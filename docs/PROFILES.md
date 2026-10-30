@@ -98,7 +98,7 @@ of this profile; the rest is our interpretation, see [CP-NOTES.md](CP-NOTES.md) 
 | Signer | the CA's delegated responder (default) or the CA key (`ocsp-signer --mode ca`) | 7.3 |
 | Signature | sha256WithRSAEncryption (`-rmd sha256`) | 7.1.3 |
 | CertID hashes | SHA-256 and SHA-1 answered | RFC 9919 3.1.1, RFC 5019 |
-| thisUpdate / nextUpdate | always; nextUpdate 60 minutes by default (`serve --ocsp-nmin`) | RFC 5019 4 (RFC 9919 5) |
+| thisUpdate / nextUpdate | always; nextUpdate 60 minutes by default (`serve --ocsp-nmin`) | RFC 5019 2.2.4 (RFC 9919 3.2.4); client freshness check: RFC 5019 4 (RFC 9919 5) |
 | Nonces | ignored (no nonce in responses) | RFC 5019 2.2.1, 4 (RFC 9919 3.2.1, 5) |
 | HTTP | GET (URL-encoded base64) and POST, `application/ocsp-response`, `Cache-Control: max-age` within nextUpdate | RFC 6960 A.1, RFC 5019 5, 6.2 (RFC 9919 6, 7.2) |
 
