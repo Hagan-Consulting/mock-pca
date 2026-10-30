@@ -30,6 +30,8 @@ var (
 	oidEKU = asn1.ObjectIdentifier{2, 5, 29, 37}
 	oidAIA = asn1.ObjectIdentifier{1, 3, 6, 1, 5, 5, 7, 1, 1}
 	oidSIA = asn1.ObjectIdentifier{1, 3, 6, 1, 5, 5, 7, 1, 11}
+	// id-pkix-ocsp-nocheck (RFC 6960 4.2.2.2.1).
+	oidNoCheck = asn1.ObjectIdentifier{1, 3, 6, 1, 5, 5, 7, 48, 1, 5}
 
 	oidCountry  = asn1.ObjectIdentifier{2, 5, 4, 6}
 	oidLocality = asn1.ObjectIdentifier{2, 5, 4, 7}
@@ -40,16 +42,17 @@ var (
 )
 
 var extNames = map[string]string{
-	oidSKI.String(): "subjectKeyIdentifier",
-	oidKU.String():  "keyUsage",
-	oidSAN.String(): "subjectAltName",
-	oidBC.String():  "basicConstraints",
-	oidCDP.String(): "cRLDistributionPoints",
-	oidCP.String():  "certificatePolicies",
-	oidAKI.String(): "authorityKeyIdentifier",
-	oidEKU.String(): "extKeyUsage",
-	oidAIA.String(): "authorityInfoAccess",
-	oidSIA.String(): "subjectInfoAccess",
+	oidSKI.String():     "subjectKeyIdentifier",
+	oidKU.String():      "keyUsage",
+	oidSAN.String():     "subjectAltName",
+	oidBC.String():      "basicConstraints",
+	oidCDP.String():     "cRLDistributionPoints",
+	oidCP.String():      "certificatePolicies",
+	oidAKI.String():     "authorityKeyIdentifier",
+	oidEKU.String():     "extKeyUsage",
+	oidAIA.String():     "authorityInfoAccess",
+	oidSIA.String():     "subjectInfoAccess",
+	oidNoCheck.String(): "id-pkix-ocsp-nocheck",
 }
 
 func extName(oid asn1.ObjectIdentifier) string {

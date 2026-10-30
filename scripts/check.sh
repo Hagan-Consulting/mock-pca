@@ -39,4 +39,7 @@ for f in bin/mockpca scripts/*.sh examples/*.sh; do
 	fi
 done
 
+echo "==> bin/mockpca unit tests"
+bash scripts/test-mockpca.sh
+
 echo "OK"

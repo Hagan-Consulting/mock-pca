@@ -32,6 +32,19 @@ expect_fail() {
 	fi
 }
 
+# hdr NAME: value of a response header in $WORK/hdr (case-insensitive).
+hdr() {
+	tr -d '\r' <"$WORK/hdr" | awk -v k="$(tr '[:upper:]' '[:lower:]' <<<"$1")" \
+		'{ i = index($0, ":"); if (i && tolower(substr($0, 1, i - 1)) == k) { print substr($0, i + 2); exit } }'
+}
+# to_epoch DATE: seconds since the epoch of an HTTP date or an OpenSSL
+# "Mon DD HH:MM:SS YYYY GMT" date (GNU date, else BSD date).
+to_epoch() {
+	date -u -d "$1" +%s 2>/dev/null ||
+		date -u -j -f '%a, %d %b %Y %H:%M:%S GMT' "$1" +%s 2>/dev/null ||
+		date -u -j -f '%b %e %H:%M:%S %Y GMT' "$1" +%s
+}
+
 step "sample hierarchy"
 BASE_URL="http://127.0.0.1:$PORT" examples/demo.sh >/dev/null 2>"$WORK/demo.log" || {
 	cat "$WORK/demo.log" >&2
@@ -156,6 +169,10 @@ for ca in state county region region2; do
 	"$M" lint -strict -q -profile ica -issuer "$PKI/ca/$(grep '^parent=' "$PKI/ca/$ca/ca.conf" | cut -d= -f2)/ca.pem" \
 		"$PKI/ca/$ca/ca.pem"
 done
+for ca in pca state county region region2; do
+	"$M" lint -strict -q -profile ocsp-responder -issuer "$PKI/ca/$ca/ca.pem" -root "$PKI/trust/pca.pem" \
+		"$PKI/ca/$ca/ocsp/cert.pem" || fail "lint of the OCSP responder certificate of $ca"
+done
 
 step "Quad ID and DN encoding"
 openssl x509 -in "$PKI/ee/jsmith/cert.pem" -noout -ext subjectAltName |
@@ -200,14 +217,196 @@ for ee in "${EES[@]}"; do
 	curl -fsS -o "$WORK/issuer.der" "$issuer_url" || fail "$ee: GET $issuer_url"
 	cmp -s "$WORK/issuer.der" <(openssl x509 -in "$PKI/ca/$ca/ca.pem" -outform DER) || fail "$ee: caIssuers certificate"
 done
-status="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/ocsp/county")"
-[[ $status == 501 ]] || fail "OCSP endpoint: HTTP $status"
 crl_url="http://127.0.0.1:$PORT/crl/county.crl"
 etag="$(curl -fsSI "$crl_url" | tr -d '\r' | sed -n 's/^[Ee][Tt][Aa][Gg]: //p')"
 last_mod="$(curl -fsSI "$crl_url" | tr -d '\r' | sed -n 's/^[Ll]ast-[Mm]odified: //p')"
 [[ -n $etag && -n $last_mod ]] || fail "no ETag/Last-Modified on CRLs"
 status="$(curl -s -o /dev/null -w '%{http_code}' -H "If-None-Match: $etag" "$crl_url")"
 [[ $status == 304 ]] || fail "If-None-Match with the current ETag: HTTP $status"
+
+step "OCSP (RFC 6960, RFC 5019/9919)"
+OCSP="http://127.0.0.1:$PORT/ocsp"
+cat "$PKI"/ca/*/ca.pem >"$WORK/cas.pem"
+# ocsp_q CA CERT HASH [openssl ocsp options]: query the CA's responder (POST)
+# and verify the response against the PCA; output in $WORK/ocsp.out.
+ocsp_q() {
+	local ca="$1" cert="$2" hash="$3"
+	shift 3
+	openssl ocsp -issuer "$PKI/ca/$ca/ca.pem" "-$hash" -cert "$cert" -url "$OCSP/$ca" -CAfile "$PKI/trust/pca.pem" \
+		-verify_other "$WORK/cas.pem" -no_nonce "$@" >"$WORK/ocsp.out" 2>&1 || true
+}
+# expect_status CERT STATUS: the last query verified and reported STATUS.
+expect_status() {
+	grep -q 'Response verify OK' "$WORK/ocsp.out" && grep -q "^$1: $2\$" "$WORK/ocsp.out" ||
+		fail "OCSP: want $2 for $1; got: $(cat "$WORK/ocsp.out")"
+}
+rpsap="$PKI/ee/rpsap/cert.pem"
+for hash in sha256 sha1; do
+	ocsp_q region "$rpsap" "$hash"
+	expect_status "$rpsap" good
+done
+grep -q 'Next Update' "$WORK/ocsp.out" || fail "OCSP response without nextUpdate"
+# GET (RFC 6960 A.1, RFC 9919 6): base64 in the path, '/' escaped as %2F;
+# '+' and '=' are valid unescaped in a path.
+openssl ocsp -issuer "$PKI/ca/region/ca.pem" -sha256 -cert "$rpsap" -no_nonce -reqout "$WORK/req.der" >/dev/null
+b64="$(base64 <"$WORK/req.der" | tr -d '\n')"
+t0="$(date -u +%s)"
+curl -fsS -D "$WORK/hdr" -o "$WORK/resp.der" "$OCSP/region/${b64//\//%2F}" || fail "OCSP GET"
+grep -qi '^content-type: application/ocsp-response' "$WORK/hdr" || fail "OCSP GET: content type"
+# Caching headers (RFC 9919 6, 7.2): Last-Modified = thisUpdate, Expires =
+# nextUpdate, max-age ending before nextUpdate, ETag = hex SHA-256.
+openssl ocsp -respin "$WORK/resp.der" -resp_text -noverify >"$WORK/resp.txt" 2>&1
+this_update="$(sed -n 's/^ *This Update: //p' "$WORK/resp.txt" | head -1)"
+next_update="$(sed -n 's/^ *Next Update: //p' "$WORK/resp.txt" | head -1)"
+[[ $(to_epoch "$(hdr expires)") == "$(to_epoch "$next_update")" ]] ||
+	fail "OCSP GET: Expires $(hdr expires) is not nextUpdate $next_update"
+[[ $(to_epoch "$(hdr last-modified)") == "$(to_epoch "$this_update")" ]] ||
+	fail "OCSP GET: Last-Modified $(hdr last-modified) is not thisUpdate $this_update"
+max_age="$(hdr cache-control | sed -n 's/^max-age=\([0-9][0-9]*\), public, no-transform, must-revalidate$/\1/p')"
+[[ -n $max_age ]] && ((t0 + max_age < $(to_epoch "$next_update"))) ||
+	fail "OCSP GET: Cache-Control $(hdr cache-control) does not end before nextUpdate $next_update"
+[[ $(hdr etag) == "\"$(openssl dgst -sha256 -r "$WORK/resp.der" | cut -d' ' -f1)\"" ]] ||
+	fail "OCSP GET: ETag $(hdr etag) is not the SHA-256 of the response"
+openssl ocsp -respin "$WORK/resp.der" -issuer "$PKI/ca/region/ca.pem" -sha256 -cert "$rpsap" \
+	-CAfile "$PKI/trust/pca.pem" -verify_other "$WORK/cas.pem" >"$WORK/ocsp.out" 2>&1 || true
+expect_status "$rpsap" good
+# The PCA's responder answers for ICAs.
+openssl ocsp -issuer "$PKI/ca/pca/ca.pem" -sha256 -cert "$PKI/ca/region/ca.pem" -url "$OCSP/pca" \
+	-CAfile "$PKI/trust/pca.pem" -no_nonce >"$WORK/ocsp.out" 2>&1 || true
+expect_status "$PKI/ca/region/ca.pem" good
+# A serial the CA never issued.
+openssl ocsp -issuer "$PKI/ca/region/ca.pem" -sha256 -serial 0x123456789 -url "$OCSP/region" \
+	-CAfile "$PKI/trust/pca.pem" -verify_other "$WORK/cas.pem" -no_nonce >"$WORK/ocsp.out" 2>&1 || true
+expect_status 0x123456789 unknown
+# GET is strict (RFC 9919 6, RFC 3986, RFC 4648 3.2): an unescaped '/', an
+# unescaped "//" (never redirected) and missing padding are malformedRequest.
+get_status() { curl -s -o "$WORK/get.der" -w '%{http_code}' "$OCSP/region/$1"; }
+raw="$b64"
+[[ $raw == */* ]] || raw="MAo/MAo="
+for path in "$raw" "MAo//MAo="; do
+	[[ $(get_status "$path") == 200 && $(od -An -tx1 "$WORK/get.der" | tr -d ' \n') == 30030a0101 ]] ||
+		fail "OCSP GET with an unescaped '/' ($path): not answered malformedRequest"
+done
+unpadded=""
+for n in 1 2 3; do
+	certs=()
+	for ((i = 0; i < n; i++)); do certs+=(-cert "$rpsap"); done
+	openssl ocsp -issuer "$PKI/ca/region/ca.pem" -sha256 "${certs[@]}" -no_nonce -reqout "$WORK/req$n.der" >/dev/null
+	p="$(base64 <"$WORK/req$n.der" | tr -d '\n')"
+	if [[ $p == *= ]]; then
+		unpadded="${p%%=*}"
+		break
+	fi
+done
+[[ -n $unpadded ]] || fail "no request with base64 padding to test"
+[[ $(get_status "${unpadded//\//%2F}") == 200 && $(od -An -tx1 "$WORK/get.der" | tr -d ' \n') == 30030a0101 ]] ||
+	fail "OCSP GET without base64 padding: not answered malformedRequest"
+# A malformed request gets malformedRequest and the server stays up.
+[[ $(curl -fsS --data-binary garbage -H 'Content-Type: application/ocsp-request' "$OCSP/region" | od -An -tx1 | tr -d ' \n') == 30030a0101 ]] ||
+	fail "malformed OCSP request: not answered malformedRequest"
+[[ $(curl -fsS --data-binary @"$WORK/req.der" "$OCSP/nosuchca" | od -An -tx1 | tr -d ' \n') == 30030a0106 ]] ||
+	fail "OCSP request for an unknown CA: not answered unauthorized"
+ocsp_q region "$rpsap" sha256
+expect_status "$rpsap" good
+
+step "OCSP signer modes and rotation"
+"$M" ocsp-signer --ca region --mode ca 2>/dev/null
+ocsp_q region "$rpsap" sha256 -resp_text
+expect_status "$rpsap" good
+grep -q 'Responder Id: C = US, O = Mock Region 911, OU = ICA-3, CN = Mock Region ICA Tier2' "$WORK/ocsp.out" ||
+	fail "CA-signed mode: responder is not the CA"
+"$M" ocsp-signer --ca region --mode delegated 2>/dev/null
+ocsp_q region "$rpsap" sha256 -resp_text
+grep -q 'Responder Id: C = US, O = Mock Region 911, CN = ocsp.ica.region.mock.test' "$WORK/ocsp.out" ||
+	fail "delegated mode: responder is not the responder certificate"
+grep -q 'OCSP No Check' "$WORK/ocsp.out" || fail "delegated mode: the responder certificate lacks id-pkix-ocsp-nocheck"
+old_responder="$(openssl x509 -in "$PKI/ca/region/ocsp/cert.pem" -noout -serial | cut -d= -f2)"
+"$M" ocsp-signer --ca region --rotate 2>/dev/null
+[[ $(openssl x509 -in "$PKI/ca/region/ocsp/cert.pem" -noout -serial | cut -d= -f2) != "$old_responder" ]] ||
+	fail "rotation kept the responder certificate"
+awk -F'\t' -v s="$old_responder" 'toupper($4) == toupper(s) { print $1 }' "$PKI/ca/region/index.txt" | grep -q R ||
+	fail "rotation did not revoke the previous responder certificate"
+ocsp_q region "$rpsap" sha256
+expect_status "$rpsap" good
+"$M" ocsp-response --ee rpsap --out "$WORK/staple.der" 2>/dev/null
+openssl ocsp -respin "$WORK/staple.der" -issuer "$PKI/ca/region/ca.pem" -sha256 -cert "$rpsap" \
+	-CAfile "$PKI/trust/pca.pem" -verify_other "$WORK/cas.pem" >"$WORK/ocsp.out" 2>&1 || true
+expect_status "$rpsap" good
+
+step "OCSP shows revocations at once"
+"$M" issue --ca region --profile element --name ocspee --id ocspee.region.mock.test --roles SAL \
+	--owner psap.region.mock.test --org "Mock Region PSAP" 2>/dev/null
+ocsp_q region "$PKI/ee/ocspee/cert.pem" sha256
+expect_status "$PKI/ee/ocspee/cert.pem" good
+"$M" revoke --ee ocspee --reason keyCompromise 2>/dev/null
+ocsp_q region "$PKI/ee/ocspee/cert.pem" sha256
+expect_status "$PKI/ee/ocspee/cert.pem" revoked
+"$M" ica --name ocspica --parent pca --pathlen 0 --id ica.ocsp.mock.test --owner psap.ocsp.mock.test \
+	--org "Mock OCSP 911" --label "Mock OCSP" 2>/dev/null
+pcaq() {
+	openssl ocsp -issuer "$PKI/ca/pca/ca.pem" -sha256 -cert "$PKI/ca/ocspica/ca.pem" -url "$OCSP/pca" \
+		-CAfile "$PKI/trust/pca.pem" -no_nonce >"$WORK/ocsp.out" 2>&1 || true
+}
+pcaq
+expect_status "$PKI/ca/ocspica/ca.pem" good
+"$M" revoke --ca ocspica --reason CACompromise 2>/dev/null
+pcaq
+expect_status "$PKI/ca/ocspica/ca.pem" revoked
+
+step "OCSP fault injection"
+fault() { "$M" ocsp-fault --ca region "$@" 2>/dev/null; }
+fault --http-status 503
+[[ $(curl -s -o /dev/null -w '%{http_code}' --data-binary @"$WORK/req.der" "$OCSP/region") == 503 ]] || fail "fault http-status"
+fault --delay-ms 1500
+t="$(curl -s -o /dev/null -w '%{time_total}' --data-binary @"$WORK/req.der" "$OCSP/region")"
+awk -v t="$t" 'BEGIN { exit !(t >= 1.5) }' || fail "fault delay-ms: answered after ${t}s"
+for st in unauthorized malformedRequest tryLater internalError; do
+	fault --status "$st"
+	ocsp_q region "$rpsap" sha256
+	grep -qi "Responder Error: $st" "$WORK/ocsp.out" || fail "fault status $st: $(cat "$WORK/ocsp.out")"
+done
+fault --sha1-only
+ocsp_q region "$rpsap" sha256
+grep -qi 'Responder Error: unauthorized' "$WORK/ocsp.out" || fail "fault sha1-only, SHA-256 CertID: $(cat "$WORK/ocsp.out")"
+ocsp_q region "$rpsap" sha1
+expect_status "$rpsap" good
+fault --unknown
+ocsp_q region "$rpsap" sha256
+expect_status "$rpsap" unknown
+fault --wrong-signer
+ocsp_q region "$rpsap" sha256
+grep -q 'Response Verify Failure' "$WORK/ocsp.out" || fail "fault wrong-signer: $(cat "$WORK/ocsp.out")"
+# A responder certificate issued by the CA without id-pkix-ocsp-nocheck (a
+# negative fixture). OpenSSL's client accepts the response: it never checks a
+# responder's own revocation status; mockpca-lint reports the certificate.
+fault --no-nocheck
+ocsp_q region "$rpsap" sha256 -resp_text
+expect_status "$rpsap" good
+grep -q 'Responder Id: .*CN = negative-no-nocheck.ocsp.ica.region.mock.test' "$WORK/ocsp.out" ||
+	fail "fault no-nocheck: not signed by the fixture: $(cat "$WORK/ocsp.out")"
+! grep -q 'OCSP No Check' "$WORK/ocsp.out" || fail "fault no-nocheck: the fixture carries id-pkix-ocsp-nocheck"
+expect_fail "lint of the no-nocheck fixture" "$M" lint -profile ocsp-responder -issuer "$PKI/ca/region/ca.pem" \
+	-root "$PKI/trust/pca.pem" "$PKI/ca/region/ocsp/negative-no-nocheck/cert.pem"
+grep -q 'id-pkix-ocsp-nocheck is missing' "$WORK/out" || fail "lint of the no-nocheck fixture: $(cat "$WORK/out")"
+expect_fail "--wrong-signer with --no-nocheck" "$M" ocsp-fault --ca region --wrong-signer --no-nocheck
+fault --stale
+curl -fsS -o "$WORK/stale1.der" --data-binary @"$WORK/req.der" "$OCSP/region"
+sleep 2
+curl -fsS -o "$WORK/stale2.der" --data-binary @"$WORK/req.der" "$OCSP/region"
+cmp -s "$WORK/stale1.der" "$WORK/stale2.der" || fail "fault stale: the response is not replayed"
+openssl ocsp -respin "$WORK/stale2.der" -issuer "$PKI/ca/region/ca.pem" -sha256 -cert "$rpsap" -status_age 1 \
+	-CAfile "$PKI/trust/pca.pem" -verify_other "$WORK/cas.pem" >"$WORK/ocsp.out" 2>&1 || true
+grep -qi 'status too old' "$WORK/ocsp.out" || fail "fault stale: replayed response is not old: $(cat "$WORK/ocsp.out")"
+if [[ ${E2E_SLOW:-} == 1 ]]; then
+	sleep 61 # past the replayed response's nextUpdate (one minute)
+	openssl ocsp -respin "$WORK/stale2.der" -issuer "$PKI/ca/region/ca.pem" -sha256 -cert "$rpsap" -validity_period 0 \
+		-CAfile "$PKI/trust/pca.pem" -verify_other "$WORK/cas.pem" >"$WORK/ocsp.out" 2>&1 || true
+	grep -qi 'status expired' "$WORK/ocsp.out" || fail "fault stale: not past nextUpdate: $(cat "$WORK/ocsp.out")"
+fi
+fault --clear
+ocsp_q region "$rpsap" sha256
+expect_status "$rpsap" good
+grep -q 'Response verify OK' "$WORK/ocsp.out" || fail "after clearing faults"
 
 step "revocation of an End-Entity certificate is published at once"
 serial="$(openssl x509 -in "$PKI/ee/jsmith/cert.pem" -noout -serial | cut -d= -f2)"

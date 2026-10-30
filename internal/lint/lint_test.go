@@ -90,6 +90,7 @@ var (
 	oidServerAuth  = asn1.ObjectIdentifier{1, 3, 6, 1, 5, 5, 7, 3, 1}
 	oidClientAuth  = asn1.ObjectIdentifier{1, 3, 6, 1, 5, 5, 7, 3, 2}
 	oidCodeSigning = asn1.ObjectIdentifier{1, 3, 6, 1, 5, 5, 7, 3, 3}
+	oidOCSPSigning = asn1.ObjectIdentifier{1, 3, 6, 1, 5, 5, 7, 3, 9}
 )
 
 func ekuExt(t testing.TB, critical bool, oids ...asn1.ObjectIdentifier) pkix.Extension {
@@ -213,6 +214,15 @@ func eeTmpl(t testing.TB, p Profile) *x509.Certificate {
 		quad = "elementId/" + id + "/LoggingService/psap.county.mock.test"
 		tmpl.KeyUsage = x509.KeyUsageDigitalSignature
 		tmpl.ExtraExtensions = append(tmpl.ExtraExtensions, ekuExt(t, true, oidCodeSigning))
+	case OCSPResponder:
+		// No revocation pointers: the certificate carries id-pkix-ocsp-nocheck.
+		id = "ocsp.ica3.mock.test"
+		quad = "elementId/" + id + "/OCSPResponder/agency.mock.test"
+		tmpl.OCSPServer, tmpl.IssuingCertificateURL, tmpl.CRLDistributionPoints = nil, nil, nil
+		tmpl.NotAfter = start.AddDate(0, 0, 30)
+		tmpl.KeyUsage = x509.KeyUsageDigitalSignature
+		tmpl.ExtraExtensions = append(tmpl.ExtraExtensions, ekuExt(t, true, oidOCSPSigning),
+			pkix.Extension{Id: oidNoCheck, Value: []byte{0x05, 0x00}})
 	}
 	tmpl.Subject = pkix.Name{Country: []string{"US"}, Organization: []string{"Mock County PSAP"}, CommonName: id}
 	tmpl.ExtraExtensions = append(tmpl.ExtraExtensions, quadSAN(t, quad, dns...))
@@ -467,6 +477,31 @@ func TestViolations(t *testing.T) {
 			replaceExt(c, ekuExt(t, true, oidServerAuth, oidClientAuth, asn1.ObjectIdentifier{2, 5, 29, 37, 0}))
 		}, nil, Error, "anyExtendedKeyUsage is not consistent"},
 		{"RSA exponent 3", Agency, &rsa.PublicKey{N: k.ee.N, E: 3}, nil, nil, Error, "public exponent 3"},
+		{"responder without nocheck", OCSPResponder, nil, func(t *testing.T, c *x509.Certificate) {
+			var keep []pkix.Extension
+			for _, e := range c.ExtraExtensions {
+				if !e.Id.Equal(oidNoCheck) {
+					keep = append(keep, e)
+				}
+			}
+			c.ExtraExtensions = keep
+		}, nil, Error, "id-pkix-ocsp-nocheck is missing"},
+		{"responder nocheck not NULL", OCSPResponder, nil, func(t *testing.T, c *x509.Certificate) {
+			replaceExt(c, pkix.Extension{Id: oidNoCheck, Value: []byte{0x04, 0x00}})
+		}, nil, Error, "nocheck value is not NULL"},
+		{"responder without OCSPSigning", OCSPResponder, nil, func(t *testing.T, c *x509.Certificate) {
+			replaceExt(c, ekuExt(t, true, oidServerAuth))
+		}, nil, Error, "id-kp-OCSPSigning is missing"},
+		{"responder with keyEncipherment", OCSPResponder, nil, func(t *testing.T, c *x509.Certificate) {
+			c.KeyUsage |= x509.KeyUsageKeyEncipherment
+		}, nil, Error, "keyEncipherment is set"},
+		{"responder with an ECC key", OCSPResponder, &k.ec.PublicKey, nil, nil, Error, "SHALL use an RSA key"},
+		{"responder with AIA", OCSPResponder, nil, func(t *testing.T, c *x509.Certificate) {
+			c.OCSPServer = []string{base + "/ocsp/ica3"}
+		}, nil, Warn, "extension authorityInfoAccess is not in the CP profile"},
+		{"responder with CDP", OCSPResponder, nil, func(t *testing.T, c *x509.Certificate) {
+			c.CRLDistributionPoints = []string{base + "/crl/ica3.crl"}
+		}, nil, Warn, "extension cRLDistributionPoints is not in the CP profile"},
 		{"EE asserts cA", Agent, nil, func(t *testing.T, c *x509.Certificate) {
 			c.BasicConstraintsValid, c.IsCA = true, true
 		}, nil, Error, "asserts cA"},
@@ -615,5 +650,17 @@ func TestDetectSigningByEKU(t *testing.T) {
 		if p, err := Detect(c.cert); err != nil || p != Signing {
 			t.Errorf("%s: Detect = %q, %v; want signing", idType, p, err)
 		}
+	}
+}
+
+// TestResponderIssuedByPCA: the PCA issues CSS certificates (CP 1.4.1), so
+// a responder certificate under the PCA is not reported.
+func TestResponderIssuedByPCA(t *testing.T) {
+	t.Parallel()
+	k, h := keys(), pki()
+	tmpl := eeTmpl(t, OCSPResponder)
+	c := create(t, tmpl, h.pca, &k.ee.PublicKey, k.pca)
+	if fs := Check(c, OCSPResponder, Options{Issuer: h.pca}); len(fs) > 0 {
+		t.Errorf("responder issued by the PCA:\n%s", join(fs))
 	}
 }

@@ -29,10 +29,13 @@ const (
 	Element Profile = "element"
 	Service Profile = "service"
 	Signing Profile = "signing"
+	// OCSPResponder is a delegated OCSP responder (CSS) certificate (CP 7.3,
+	// RFC 6960 4.2.2.2); see docs/CP-NOTES.md N21 for the profile.
+	OCSPResponder Profile = "ocsp-responder"
 )
 
 // Profiles lists every profile.
-var Profiles = []Profile{PCA, ICA, Agency, Agent, Element, Service, Signing}
+var Profiles = []Profile{PCA, ICA, Agency, Agent, Element, Service, Signing, OCSPResponder}
 
 // ParseProfile returns the profile named s.
 func ParseProfile(s string) (Profile, error) {
@@ -150,12 +153,13 @@ func Check(c *x509.Certificate, p Profile, o Options) []Finding {
 	k.distributionPoints()
 	k.authorityInfoAccess()
 	k.issuer()
+	k.noCheck()
 	return k.out
 }
 
 // Detect guesses the profile of c from its Quad ID and extKeyUsage: a
-// non-CA certificate with id-kp-codeSigning is a Signing Certificate,
-// whatever its idType.
+// non-CA certificate with id-kp-OCSPSigning is an OCSP responder, one with
+// id-kp-codeSigning a Signing Certificate, whatever its idType.
 func Detect(c *x509.Certificate) (Profile, error) {
 	q, err := quadOf(c)
 	if err != nil {
@@ -163,7 +167,10 @@ func Detect(c *x509.Certificate) (Profile, error) {
 	}
 	if q.IDType != "cAId" {
 		for _, u := range c.ExtKeyUsage {
-			if u == x509.ExtKeyUsageCodeSigning {
+			switch u {
+			case x509.ExtKeyUsageOCSPSigning:
+				return OCSPResponder, nil
+			case x509.ExtKeyUsageCodeSigning:
 				return Signing, nil
 			}
 		}
@@ -267,6 +274,22 @@ func (k *checker) rules() map[string]extRule {
 		set(oidSAN, required, false, "7.1.2.2 Table 15")
 		set(oidSIA, optional, false, "7.1.2.2 Table 15")
 		set(oidSKI, required, false, "7.1.2.2 Table 15")
+	case OCSPResponder:
+		// CP 7.3: id-pkix-ocsp-nocheck; extKeyUsage id-kp-OCSPSigning per
+		// RFC 6960 4.2.2.2, keyUsage digitalSignature per RFC 5280 4.2.1.3; the
+		// rest as End-Entity Certificates where it applies (N21). No
+		// revocation pointers are needed (nocheck): RFC 5019 2.2.2 and
+		// RFC 9919 3.2.2 recommend neither AIA nor CDP, so either is a warning.
+		set(oidNoCheck, required, false, "7.3")
+		set(oidEKU, required, true, "7.3, RFC 6960 4.2.2.2")
+		set(oidKU, required, true, "RFC 5280 4.2.1.3")
+		set(oidAKI, required, false, "7.1.2.3 Table 16")
+		set(oidSKI, required, false, "7.1.2.3 Table 16")
+		set(oidSAN, required, false, "7.1.2.11")
+		set(oidCP, required, false, "4.10")
+		set(oidAIA, unexpected, false, "RFC 5019 2.2.2")
+		set(oidCDP, unexpected, false, "RFC 5019 2.2.2")
+		set(oidBC, unexpected, false, "7.1.2.3 Table 16")
 	default:
 		set(oidAIA, required, false, "7.1.2.3 Table 16")
 		set(oidAKI, required, false, "7.1.2.3 Table 16")
@@ -363,6 +386,8 @@ func (k *checker) keyUsage() {
 		must, ref = x509.KeyUsageDigitalSignature|x509.KeyUsageKeyEncipherment, "6.1.7.2 Table 10"
 	case Signing:
 		must, ref = x509.KeyUsageDigitalSignature, "6.1.7.2 Table 11"
+	case OCSPResponder:
+		must, ref = x509.KeyUsageDigitalSignature, "RFC 5280 4.2.1.3"
 	}
 	got := k.c.KeyUsage
 	for _, n := range kuNames {
@@ -386,6 +411,8 @@ func (k *checker) extKeyUsage() {
 		want, ref = []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth}, "7.1.2.9 Table 26"
 	case Signing:
 		want, ref = []x509.ExtKeyUsage{x509.ExtKeyUsageCodeSigning}, "7.1.2.9 Table 27"
+	case OCSPResponder:
+		want, ref = []x509.ExtKeyUsage{x509.ExtKeyUsageOCSPSigning}, "7.3, RFC 6960 4.2.2.2"
 	default:
 		return // reported by extensions()
 	}
@@ -591,7 +618,20 @@ func (k *checker) issuer() {
 	if err := k.c.CheckSignatureFrom(k.iss); err != nil {
 		k.errorf("7.1.3", "signature does not verify with the issuer certificate: %v", err)
 	}
-	if !k.p.isCA() && selfSigned(k.iss) {
+	// The PCA issues CSS (OCSP responder) certificates itself (CP 1.4.1).
+	if !k.p.isCA() && k.p != OCSPResponder && selfSigned(k.iss) {
 		k.errorf("1.4.1", "End-Entity Certificates are issued by ICAs, not by the PCA")
+	}
+}
+
+// noCheck checks the id-pkix-ocsp-nocheck extension of an OCSP responder:
+// its value is NULL (RFC 6960 4.2.2.2.1).
+func (k *checker) noCheck() {
+	v := k.ext(oidNoCheck)
+	if v == nil || k.p != OCSPResponder {
+		return
+	}
+	if !bytes.Equal(v, []byte{0x05, 0x00}) {
+		k.errorf("7.3, RFC 6960 4.2.2.2.1", "id-pkix-ocsp-nocheck value is not NULL")
 	}
 }

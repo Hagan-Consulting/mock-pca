@@ -1,0 +1,13 @@
+# NEGATIVE TEST FIXTURE, not a CP profile: an OCSP responder certificate issued
+# by the CA but WITHOUT id-pkix-ocsp-nocheck (CP 7.3 requires it). Used only by
+# `mockpca ocsp-fault --no-nocheck`, to test whether relying parties reject such
+# responses or check the responder's own revocation status (RFC 6960
+# 4.2.2.2.1). mockpca-lint reports it (CLAUDE.md: negative fixtures are explicit
+# and still reported). Otherwise identical to ocsp-responder.ext.
+[ mockpca_ext ]
+authorityKeyIdentifier = keyid:always
+certificatePolicies    = 1.3.6.1.4.1.55670.1
+extendedKeyUsage       = critical, OCSPSigning
+keyUsage               = critical, digitalSignature
+subjectAltName         = @mockpca_san
+subjectKeyIdentifier   = hash

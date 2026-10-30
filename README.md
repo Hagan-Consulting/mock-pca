@@ -26,12 +26,13 @@ buying production certificates.
   - PrintableString/UTF8String DNs per CP §3.1.1
 - **`mockpca-lint`**: an independent Go checker that every issued certificate passes before it is handed out. It also
   works on certificates from other sources, e.g. a real PCA certificate.
-- **`mockpca-serve`**: serves the CA certificates (`caIssuers`) and CRLs (`cRLDistributionPoints`) over HTTP.
-  `mockpca serve` runs it and republishes the CRLs before they go stale.
-
-OCSP is planned, not built yet: [#1](https://github.com/Hagan-Consulting/mock-pca/issues/1). Certificates already
-carry the OCSP URL the CP requires. Until then, `mockpca-serve` answers `501 Not Implemented` there, so relying parties
-see an OCSP failure and fall back to CRLs.
+- **`mockpca-serve`**: serves the CA certificates (`caIssuers`) and CRLs (`cRLDistributionPoints`) over HTTP, and
+  answers OCSP at the AIA URL of every CA (`<base>/ocsp/<ca>`, GET and POST, SHA-1 and SHA-256 CertIDs). GET
+  requests must follow RFC 9919 strictly (`/` sent as `%2F`, base64 padding present); others get
+  `malformedRequest`, because this is a test target and broken clients should fail visibly. Each OCSP
+  response is signed by OpenSSL from the CA's current database, so revocations show at once. Every CA has a delegated
+  responder certificate (or signs with its own key), and faults can be injected per CA for relying-party tests.
+  `mockpca serve` runs it, republishes the CRLs before they go stale and renews responder certificates.
 
 ## Requirements
 
@@ -91,7 +92,10 @@ mockpca [--pki DIR] COMMAND [options]       (PKI directory: --pki, else $MOCKPCA
 | `verify --ee N \| --ca N [--no-crl]` | `openssl verify` with `-x509_strict`, the CP policy OID (`-explicit_policy`) and all CRLs. |
 | `list` | All CAs and certificates with status (V valid, R revoked, E expired). |
 | `lint [flags] FILE…` | Run `mockpca-lint`. |
-| `serve [--listen ADDR] [--crl-hours H]` | Serve `pki/www` and republish CRLs every H/2 hours. More than 48 hours (republishing less often than daily, CP Table 3) is allowed for testing, with a warning. |
+| `serve [--listen ADDR] [--crl-hours H] [--ocsp-nmin M]` | Serve `pki/www` and OCSP; republish CRLs every H/2 hours and, at least daily, renew responder certificates that expire within 7 days. More than 48 hours (republishing less often than daily, CP Table 3) is allowed for testing, with a warning. OCSP responses are valid for M minutes (default 60). |
+| `ocsp-signer --ca N [--mode delegated\|ca] [--rotate] [--days D]` | Choose who signs the CA's OCSP responses: its delegated responder certificate (default; issued with the CA, in `ca/N/ocsp/`) or the CA key. `--rotate` issues a new responder certificate (default 30 days) and revokes the old one. |
+| `ocsp-fault --ca N …` | Fault injection for the CA's responder; each call replaces the CA's faults. `--http-status N`, `--delay-ms N`, `--status unauthorized\|malformedRequest\|tryLater\|internalError`, `--sha1-only` (SHA-256 CertIDs get `unauthorized`), `--stale` (a response is replayed unchanged; past its nextUpdate after a minute), `--wrong-signer` (signed by a self-signed rogue certificate), `--no-nocheck` (signed by a negative fixture: a responder certificate issued by the CA but without `id-pkix-ocsp-nocheck`, made on demand in `ca/N/ocsp/negative-no-nocheck/` and reported by `mockpca-lint`), `--unknown` (every serial unknown); `--show`, `--clear`. |
+| `ocsp-response --ee N [--out FILE] [--nmin M]` | Write a fresh DER OCSP response for a certificate (default `ee/N/ocsp.der`), e.g. as a staple. |
 
 By default the tool does not produce CP violations. It enforces:
 - Every certificate passes `mockpca-lint`. One that fails is revoked in its issuer's CRL and moved to `pki/rejected/`;
@@ -115,6 +119,10 @@ By default the tool does not produce CP violations. It enforces:
 | Stale CRL (past `nextUpdate`) | `bin/mockpca crl --ca county --seconds 60` and wait a minute. A running `mockpca serve` republishes only every `--crl-hours`/2, but restarting it republishes all CRLs |
 | Unreachable distribution point | Stop `mockpca serve` |
 | Fresh CRLs again | `bin/mockpca crl --all` |
+| OCSP `revoked` | `revoke` as above; the next OCSP answer shows it (no republishing needed) |
+| OCSP responder down or slow | `bin/mockpca ocsp-fault --ca county --http-status 503` or `--delay-ms 5000` |
+| OCSP `unknown`, error statuses, SHA-1-only responder, stale or wrongly signed responses | `bin/mockpca ocsp-fault --ca county --unknown` (or `--status tryLater`, `--sha1-only`, `--stale`, `--wrong-signer`); `--clear` ends it |
+| Responder certificate without `id-pkix-ocsp-nocheck` (does the client reject it, or check the responder's revocation?) | `bin/mockpca ocsp-fault --ca county --no-nocheck` |
 
 ## Linting certificates from anywhere
 
@@ -139,8 +147,9 @@ bin/mockpca lint -root pki/trust/pca.pem fullchain.pem
 bin/mockpca            bash CLI (OpenSSL)
 profiles/              ca.cnf (shared CA config) and one *.ext per CP profile
 cmd/mockpca-lint       profile checker (Go, standard library)
-cmd/mockpca-serve      HTTP publication of CA certificates and CRLs (Go, standard library)
+cmd/mockpca-serve      HTTP publication of CA certificates and CRLs, OCSP (Go, standard library)
 internal/lint          lint rules
+internal/ocsp          OCSP request decoding, fault injection, OpenSSL signing
 examples/demo.sh       sample hierarchy
 scripts/check.sh       gofmt, go vet, go test -race, bash -n
 scripts/e2e.sh         OpenSSL end-to-end test

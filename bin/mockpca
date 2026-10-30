@@ -20,6 +20,12 @@ export OPENSSL_CONF=/dev/null
 # Paths removed when the script exits (temporary files, failed issuances).
 CLEANUP=()
 cleanup() { ((${#CLEANUP[@]} == 0)) || rm -rf -- "${CLEANUP[@]}"; }
+# cleanup_drop PATH: keep PATH after all (it was completed).
+cleanup_drop() {
+	local keep=() p
+	for p in "${CLEANUP[@]}"; do [[ $p == "$1" ]] || keep+=("$p"); done
+	CLEANUP=("${keep[@]}")
+}
 trap cleanup EXIT
 
 usage() {
@@ -57,7 +63,19 @@ Commands:
   verify    Verify a certificate with OpenSSL (chain, CP policy OID, CRLs).   --ee NAME | --ca NAME  [--no-crl]
   list      List CAs and End-Entity certificates with their status.
   lint      Run mockpca-lint on certificate files.   [mockpca-lint flags] FILE...
-  serve     Serve CA certificates and CRLs over HTTP and refresh CRLs.   [--listen ADDR] [--crl-hours N]
+  ocsp-signer   Choose or renew a CA's OCSP signer.   --ca NAME [--mode delegated|ca] [--rotate] [--days N]
+              delegated (default): the CA's responder certificate in ca/NAME/ocsp/ (issued with the CA);
+              ca: the CA key signs its own responses. --rotate issues a new responder certificate.
+  ocsp-fault    Fault injection for a CA's OCSP responder (read by mockpca-serve on every request).
+              --ca NAME  --clear | --show | [--http-status N] [--delay-ms N]
+              [--status unauthorized|malformedRequest|tryLater|internalError] [--sha1-only] [--stale]
+              [--wrong-signer | --no-nocheck] [--unknown]      (each call replaces the CA's faults)
+              --no-nocheck signs with a NEGATIVE FIXTURE: a responder certificate issued by the CA
+              without id-pkix-ocsp-nocheck (made on demand in ca/NAME/ocsp/negative-no-nocheck/).
+  ocsp-response Write a fresh DER OCSP response for a certificate (stapling tests).
+              --ee NAME [--out FILE] [--nmin N]   (default ee/NAME/ocsp.der, nextUpdate 60 minutes)
+  serve     Serve CA certificates, CRLs and OCSP over HTTP; refresh CRLs and responder certificates.
+              [--listen ADDR] [--crl-hours N] [--ocsp-nmin N]
   help      Show this help.
 
 See README.md and docs/ for details.
@@ -443,9 +461,13 @@ cmd_init() {
 	kv_set "$d/ca.conf" id "$id"
 	kv_set "$d/ca.conf" subject "$subj"
 	kv_set "$d/ca.conf" quad "cAId/$id/PCA/$id"
+	kv_set "$d/ca.conf" owner "$id"
+	kv_set "$d/ca.conf" org "$org"
+	kv_set "$d/ca.conf" country "$country"
 	cp "$d/ca.pem" "$PKI/trust/pca.pem"
 	publish_ca_cert "$name"
 	gen_crl "$name"
+	issue_responder "$name"
 	CLEANUP=()
 	note "PCA created: $d/ca.pem (trust anchor: $PKI/trust/pca.pem)"
 }
@@ -572,6 +594,269 @@ cmd_ica() {
 	publish_ca_cert "$name"
 	gen_crl "$name"
 	note "ICA '$name' (Tier $tier, pathLenConstraint $pathlen) created: $d/ca.pem${renew:+ (re-key of '$renew')}"
+	issue_responder "$name"
+}
+
+# ---------------------------------------------------------------------------
+# OCSP (served by mockpca-serve, signed by OpenSSL).
+
+# issue_responder CA [DAYS]: issue the CA's delegated OCSP responder
+# certificate into ca/<CA>/ocsp/ (CP 7.3, N21), replacing (and revoking as
+# superseded) an existing one.
+issue_responder() {
+	local name="$1" days="${2:-30}" d od id owner org country rid subj quad nd validity
+	d="$(ca_dir "$name")"
+	od="$d/ocsp"
+	id="$(kv_get "$d/ca.conf" id)"
+	owner="$(kv_get "$d/ca.conf" owner || printf '%s' "$id")"
+	org="$(kv_get "$d/ca.conf" org)" || die "CA '$name' was created by an older mockpca (no org in ca.conf)"
+	country="$(kv_get "$d/ca.conf" country || kv_get "$PKI/pki.conf" country)"
+	rid="ocsp.$id"
+	((${#rid} <= 64)) || die "responder iD $rid is longer than 64 characters"
+	# Subject attribute order of CP Tables 2 and 36: c, o, cn.
+	subj="/C=$country/O=$(subj_escape "$org")/CN=$rid"
+	quad="elementId/$rid/OCSPResponder/$owner"
+	resolve_lint
+	nd="$od/responder"
+	mkdir -p "$od"
+	rm -rf "$nd"
+	mkdir "$nd"
+	CLEANUP+=("$nd")
+	genkey rsa:2048 "$nd/key.pem"
+	write_issue_cnf "$nd/issue.cnf" ocsp-responder "$quad" "" ""
+	"$OPENSSL" req -new -config "$nd/issue.cnf" -key "$nd/key.pem" -out "$nd/csr.pem"
+	mapfile -t validity < <(validity_args "$d/ca.pem" "$days")
+	(cd "$d" && "$OPENSSL" ca -batch -config "$CA_CNF" -preserveDN -in "$nd/csr.pem" -out "$nd/cert.pem" \
+		-extfile "$nd/issue.cnf" -extensions mockpca_ext "${validity[@]}" -notext -subj "$subj" 2>/dev/null) ||
+		die "issuing the OCSP responder certificate of '$name' failed"
+	cleanup_drop "$nd"
+	run_lint ocsp-responder "$nd/cert.pem" "$d/ca.pem" || reject_issued "$nd/cert.pem" "$name" "$nd"
+	if [[ -f $od/cert.pem && $(status_of "$od/cert.pem" "$name") != R ]]; then
+		(cd "$d" && "$OPENSSL" ca -config "$CA_CNF" -revoke "$od/cert.pem" -crl_reason superseded 2>/dev/null) ||
+			note "could not revoke the previous responder certificate of '$name'"
+		gen_crl "$name"
+	fi
+	local f
+	for f in key.pem csr.pem issue.cnf cert.pem; do mv "$nd/$f" "$od/$f"; done
+	rmdir "$nd"
+	note "OCSP responder certificate of '$name': $od/cert.pem (iD $rid)"
+}
+
+# ocsp_signer_files CA_DIR: prints the signing certificate and key of a CA's
+# responder (ocsp.conf: delegated or ca).
+ocsp_signer_files() {
+	local d="$1" mode
+	mode="$(kv_get "$d/ocsp.conf" signer 2>/dev/null || true)"
+	case "${mode:-delegated}" in
+	delegated) printf '%s\n%s\n' "$d/ocsp/cert.pem" "$d/ocsp/key.pem" ;;
+	ca) printf '%s\n%s\n' "$d/ca.pem" "$d/ca.key" ;;
+	*) die "$d/ocsp.conf: unknown signer '$mode'" ;;
+	esac
+}
+
+cmd_ocsp_signer() {
+	local ca="" mode="" rotate=0 days=30
+	while (($#)); do
+		case "$1" in
+		--ca) ca="${2:?}"; shift 2 ;;
+		--mode) mode="${2:?}"; shift 2 ;;
+		--rotate) rotate=1; shift ;;
+		--days) days="${2:?}"; shift 2 ;;
+		*) die "ocsp-signer: unknown option $1" ;;
+		esac
+	done
+	require_pki
+	[[ -n $ca ]] || die "ocsp-signer: --ca is required"
+	check_name --ca "$ca"
+	[[ -n $mode || $rotate == 1 ]] || die "ocsp-signer: give --mode and/or --rotate"
+	check_int --days "$days"
+	((days >= 1 && days <= 365)) || die "--days: 1 to 365"
+	local d
+	d="$(ca_dir "$ca")"
+	if [[ -n $mode ]]; then
+		[[ $mode == delegated || $mode == ca ]] || die "--mode: delegated or ca"
+		kv_set "$d/ocsp.conf" signer "$mode"
+		note "OCSP responses of '$ca' are signed by $([[ $mode == ca ]] && echo "the CA key" || echo "its responder certificate")"
+	fi
+	if ((rotate)); then
+		resolve_lint
+		issue_responder "$ca" "$days"
+	fi
+}
+
+cmd_ocsp_fault() {
+	local ca="" clear=0 show=0 lines=() rogue=0 nonocheck=0
+	while (($#)); do
+		case "$1" in
+		--ca) ca="${2:?}"; shift 2 ;;
+		--clear) clear=1; shift ;;
+		--show) show=1; shift ;;
+		--http-status)
+			[[ ${2:?} =~ ^[1-5][0-9][0-9]$ ]] || die "--http-status: 100-599"
+			lines+=("http_status=$2"); shift 2 ;;
+		--delay-ms)
+			check_int --delay-ms "${2:?}"
+			((10#$2 <= 25000)) || die "--delay-ms: at most 25000 (below the server's write timeout)"
+			lines+=("delay_ms=$((10#$2))"); shift 2 ;;
+		--status)
+			[[ ${2:?} =~ ^(unauthorized|malformedRequest|tryLater|internalError)$ ]] ||
+				die "--status: unauthorized, malformedRequest, tryLater or internalError"
+			lines+=("status=$2"); shift 2 ;;
+		--sha1-only) lines+=("sha1_only=1"); shift ;;
+		--stale) lines+=("stale=1"); shift ;;
+		--wrong-signer) lines+=("wrong_signer=1"); rogue=1; shift ;;
+		--no-nocheck) lines+=("no_nocheck=1"); nonocheck=1; shift ;;
+		--unknown) lines+=("unknown=1"); shift ;;
+		*) die "ocsp-fault: unknown option $1" ;;
+		esac
+	done
+	require_pki
+	[[ -n $ca ]] || die "ocsp-fault: --ca is required"
+	check_name --ca "$ca"
+	local d f
+	d="$(ca_dir "$ca")"
+	f="$d/ocsp-fault.conf"
+	if ((show)); then
+		if [[ -s $f ]]; then cat "$f"; else echo "no faults"; fi
+		return
+	fi
+	if ((clear)); then
+		[[ ${#lines[@]} -eq 0 ]] || die "ocsp-fault: --clear takes no other faults"
+		rm -f "$f"
+		note "OCSP faults of '$ca' cleared"
+		return
+	fi
+	[[ ${#lines[@]} -gt 0 ]] || die "ocsp-fault: give faults, --clear or --show"
+	((rogue + nonocheck < 2)) || die "ocsp-fault: --wrong-signer and --no-nocheck each choose the signer; give one"
+	if ((rogue)); then
+		make_rogue_signer "$d/ocsp"
+	fi
+	if ((nonocheck)); then
+		make_no_nocheck_signer "$ca"
+	fi
+	printf '%s\n' "${lines[@]}" >"$f.tmp"
+	mv "$f.tmp" "$f"
+	note "OCSP faults of '$ca': ${lines[*]}"
+}
+
+# make_rogue_signer DIR: a self-signed OCSP signing certificate outside the
+# PKI, for the wrong-signer fault. Deliberately untrusted and named as such
+# (CLAUDE.md: negative fixtures are explicit); mockpca-lint rejects it.
+make_rogue_signer() {
+	local od="$1"
+	[[ ! -f $od/rogue-cert.pem ]] || return 0
+	mkdir -p "$od"
+	cat >"$od/rogue.cnf" <<-'EOF'
+		[ req ]
+		distinguished_name = rogue_dn
+		[ rogue_dn ]
+		[ rogue_ext ]
+		keyUsage         = critical, digitalSignature
+		extendedKeyUsage = OCSPSigning
+	EOF
+	genkey rsa:2048 "$od/rogue-key.pem"
+	"$OPENSSL" req -x509 -new -key "$od/rogue-key.pem" -config "$od/rogue.cnf" -extensions rogue_ext -days 30 \
+		-subj "/O=MOCK ROGUE OCSP SIGNER - NOT TRUSTED/CN=rogue.ocsp.mock.test" -out "$od/rogue-cert.pem" ||
+		die "creating the rogue OCSP signer failed"
+}
+
+# make_no_nocheck_signer CA: the NEGATIVE TEST FIXTURE of the no-nocheck
+# fault: an OCSP responder certificate issued by the CA itself but without
+# id-pkix-ocsp-nocheck (profiles/negative-ocsp-responder-no-nocheck.ext), in
+# ca/<CA>/ocsp/negative-no-nocheck/. Made only on demand (and again when it
+# expires within a day), kept apart from the CA's real responder and outside
+# the uniqueness check, and it must still be reported by mockpca-lint
+# (CLAUDE.md): if the lint passes it, or reports anything but the missing
+# nocheck, the fixture is wrong and the command fails.
+make_no_nocheck_signer() {
+	local name="$1" d nd id owner org country rid subj quad validity out
+	d="$(ca_dir "$name")"
+	nd="$d/ocsp/negative-no-nocheck"
+	if [[ -f $nd/cert.pem ]] && "$OPENSSL" x509 -in "$nd/cert.pem" -noout -checkend 86400 >/dev/null; then
+		return 0
+	fi
+	require_active_ca "$name"
+	id="$(kv_get "$d/ca.conf" id)"
+	owner="$(kv_get "$d/ca.conf" owner || printf '%s' "$id")"
+	org="$(kv_get "$d/ca.conf" org)" || die "CA '$name' was created by an older mockpca (no org in ca.conf)"
+	country="$(kv_get "$d/ca.conf" country || kv_get "$PKI/pki.conf" country)"
+	rid="negative-no-nocheck.ocsp.$id"
+	((${#rid} <= 64)) || die "fixture iD $rid is longer than 64 characters"
+	subj="/C=$country/O=$(subj_escape "$org")/CN=$rid"
+	quad="elementId/$rid/OCSPResponder/$owner"
+	resolve_lint
+	rm -rf "$nd"
+	mkdir -p "$nd"
+	CLEANUP+=("$nd")
+	genkey rsa:2048 "$nd/key.pem"
+	write_issue_cnf "$nd/issue.cnf" negative-ocsp-responder-no-nocheck "$quad" "" ""
+	"$OPENSSL" req -new -config "$nd/issue.cnf" -key "$nd/key.pem" -out "$nd/csr.pem"
+	mapfile -t validity < <(validity_args "$d/ca.pem" 30)
+	(cd "$d" && "$OPENSSL" ca -batch -config "$CA_CNF" -preserveDN -in "$nd/csr.pem" -out "$nd/cert.pem" \
+		-extfile "$nd/issue.cnf" -extensions mockpca_ext "${validity[@]}" -notext -subj "$subj" 2>/dev/null) ||
+		die "issuing the no-nocheck fixture of '$name' failed"
+	cleanup_drop "$nd"
+	# A fixture with any other lint result is wrong: like any certificate
+	# that fails its check, it is revoked and moved to rejected/.
+	if out="$("$LINT" -q -profile ocsp-responder -issuer "$d/ca.pem" -root "$PKI/trust/pca.pem" "$nd/cert.pem")"; then
+		note "negative fixture $nd/cert.pem passed mockpca-lint, but must lack id-pkix-ocsp-nocheck"
+		reject_issued "$nd/cert.pem" "$name" "$nd"
+	fi
+	if [[ $out != *"id-pkix-ocsp-nocheck is missing"* || $(grep -c ERROR <<<"$out") != 1 ]]; then
+		note "negative fixture $nd/cert.pem: unexpected lint findings: $out"
+		reject_issued "$nd/cert.pem" "$name" "$nd"
+	fi
+	note "NEGATIVE FIXTURE (mockpca-lint reports it, as expected): $nd/cert.pem: ${out#*: }"
+}
+
+cmd_ocsp_response() {
+	local ee="" out="" nmin=60
+	while (($#)); do
+		case "$1" in
+		--ee) ee="${2:?}"; shift 2 ;;
+		--out) out="${2:?}"; shift 2 ;;
+		--nmin) nmin="${2:?}"; shift 2 ;;
+		*) die "ocsp-response: unknown option $1" ;;
+		esac
+	done
+	require_pki
+	[[ -n $ee ]] || die "ocsp-response: --ee is required"
+	check_name --ee "$ee"
+	check_int --nmin "$nmin"
+	((nmin >= 1)) || die "--nmin: at least 1"
+	local d ca cadir tmp signer
+	d="$(ee_dir "$ee")"
+	ca="$(kv_get "$d/ee.conf" ca)"
+	cadir="$(ca_dir "$ca")"
+	out="${out:-$d/ocsp.der}"
+	tmp="$(mktemp -d "$PKI/.ocsp.XXXXXX")"
+	CLEANUP+=("$tmp")
+	mapfile -t signer < <(ocsp_signer_files "$cadir")
+	[[ ${#signer[@]} -eq 2 ]] || die "cannot determine the OCSP signer of '$ca'"
+	"$OPENSSL" ocsp -issuer "$cadir/ca.pem" -sha256 -cert "$d/cert.pem" -no_nonce -reqout "$tmp/req.der" >/dev/null ||
+		die "building the OCSP request failed"
+	"$OPENSSL" ocsp -index "$cadir/index.txt" -CA "$cadir/ca.pem" -rsigner "${signer[0]}" -rkey "${signer[1]}" \
+		-rmd sha256 -nmin "$nmin" -reqin "$tmp/req.der" -respout "$tmp/resp.der" >/dev/null 2>&1 ||
+		die "signing the OCSP response failed"
+	mv "$tmp/resp.der" "$out"
+	note "OCSP response for '$ee' written to $out (nextUpdate in $nmin minutes)"
+}
+
+# refresh_responders: renew delegated responder certificates that expire
+# within 7 days (or are missing), for CAs that are not revoked.
+refresh_responders() {
+	local d name parent
+	for d in "$PKI"/ca/*/; do
+		name="$(basename "$d")"
+		[[ -f $d/ca.conf ]] || continue
+		parent="$(kv_get "$d/ca.conf" parent || true)"
+		[[ -z $parent || $(status_of "$d/ca.pem" "$parent") == V ]] || continue
+		if [[ ! -f $d/ocsp/cert.pem ]] || ! "$OPENSSL" x509 -in "$d/ocsp/cert.pem" -noout -checkend 604800 >/dev/null; then
+			# A separate process, so that errexit stays in force inside it.
+			"${BASH_SOURCE[0]}" --pki "$PKI" ocsp-signer --ca "$name" --rotate ||
+				note "renewing the OCSP responder certificate of '$name' failed"
+		fi
+	done
 }
 
 # ica_renewal_values: for ica --renew, take the Quad ID, parent and subject
@@ -886,13 +1171,14 @@ cmd_list() {
 }
 
 cmd_serve() {
-	local listen="127.0.0.1:8080" hours
+	local listen="127.0.0.1:8080" hours nmin=60
 	require_pki
 	hours="$(kv_get "$PKI/pki.conf" crl_hours)"
 	while (($#)); do
 		case "$1" in
 		--listen) listen="${2:?}"; shift 2 ;;
 		--crl-hours) check_int --crl-hours "${2:?}"; hours="$2"; shift 2 ;;
+		--ocsp-nmin) check_int --ocsp-nmin "${2:?}"; nmin="$2"; shift 2 ;;
 		*) die "serve: unknown option $1" ;;
 		esac
 	done
@@ -901,21 +1187,48 @@ cmd_serve() {
 		note "WARNING: republishing CRLs every $((hours / 2)) hours exceeds CP Table 3 (a new CRL at least every 24 hours); allowed for testing"
 	kv_set "$PKI/pki.conf" crl_hours "$hours"
 	local serve pid sleeper=""
+	((nmin >= 1)) || die "--ocsp-nmin must be at least 1"
 	serve="$(go_tool mockpca-serve)"
+	resolve_lint
+	refresh_responders
 	cmd_crl --all
-	"$serve" -root "$PKI/www" -listen "$listen" &
+	"$serve" -pki "$PKI" -listen "$listen" -openssl "$(command -v "$OPENSSL")" -nmin "$nmin" &
 	pid=$!
 	trap 'kill "$pid" $sleeper 2>/dev/null; wait "$pid" 2>/dev/null; exit 0' INT TERM
-	note "serving $PKI/www on $listen; CRLs are republished every $((hours * 30)) minutes (half their lifetime)"
+	note "serving $PKI/www and OCSP on $listen; CRLs are republished every $((hours * 30)) minutes (half their lifetime)"
+	# CRLs are republished every half lifetime; responder certificates (30
+	# days, renewed within 7 days of expiry) are checked daily, whatever the
+	# CRL interval. Sleep until whichever is due first.
+	local crl_every=$((hours * 1800)) next_crl next_check
+	next_crl=$((SECONDS + crl_every))
+	next_check=$((SECONDS + SERVE_CHECK_EVERY))
 	while kill -0 "$pid" 2>/dev/null; do
-		sleep $((hours * 1800)) </dev/null >/dev/null 2>&1 &
+		sleep "$(serve_wait "$SECONDS" "$next_crl" "$next_check")" </dev/null >/dev/null 2>&1 &
 		sleeper=$!
 		wait "$sleeper" || true
 		sleeper=""
 		kill -0 "$pid" 2>/dev/null || break
-		cmd_crl --all
+		if ((SECONDS >= next_check)); then
+			refresh_responders
+			next_check=$((SECONDS + SERVE_CHECK_EVERY))
+		fi
+		if ((SECONDS >= next_crl)); then
+			cmd_crl --all
+			next_crl=$((SECONDS + crl_every))
+		fi
 	done
 	wait "$pid"
+}
+
+# Seconds between responder certificate checks in serve.
+SERVE_CHECK_EVERY=86400
+
+# serve_wait NOW NEXT_CRL NEXT_CHECK: the seconds serve sleeps until the
+# earlier of the next CRL republishing and the next responder check (at
+# least 1, so an overdue task does not spin).
+serve_wait() {
+	local next=$(($2 < $3 ? $2 : $3))
+	echo $((next > $1 ? next - $1 : 1))
 }
 
 main() {
@@ -947,8 +1260,14 @@ main() {
 	verify) cmd_verify "$@" ;;
 	list) cmd_list "$@" ;;
 	serve) cmd_serve "$@" ;;
+	ocsp-signer) cmd_ocsp_signer "$@" ;;
+	ocsp-fault) cmd_ocsp_fault "$@" ;;
+	ocsp-response) cmd_ocsp_response "$@" ;;
 	*) die "unknown command '$cmd' (see 'mockpca help')" ;;
 	esac
 }
 
-main "$@"
+# Run main unless sourced (scripts/test-mockpca.sh tests single functions).
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
+	main "$@"
+fi

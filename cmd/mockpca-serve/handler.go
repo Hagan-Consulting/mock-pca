@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"strings"
 	"time"
 )
 
@@ -18,14 +19,24 @@ import (
 // <ca-name>.crl. Anything else (paths, dot files) is not served.
 var fileName = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}\.(cer|crl)$`)
 
-func newHandler(root *os.Root, log *slog.Logger) http.Handler {
+// newHandler serves www/ through root and passes /ocsp/ to the responder.
+// OCSP requests go to the responder before the ServeMux: its path cleaning
+// would redirect a GET whose request contains an unescaped "//" instead of
+// letting the responder answer malformedRequest like any other unescaped
+// '/'. Skipping the cleaning is safe: the responder checks the CA name
+// against ^[a-z0-9][a-z0-9-]{0,62}$ and only decodes the rest of the path as
+// an OCSP request, never as a file path.
+func newHandler(root *os.Root, ocspResponder http.Handler, log *slog.Logger) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("GET /certs/{file}", serveFile(root, log, "certs", ".cer", "application/pkix-cert"))
 	mux.Handle("GET /crl/{file}", serveFile(root, log, "crl", ".crl", "application/pkix-crl"))
-	mux.HandleFunc("/ocsp/", func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "OCSP is not implemented yet by mockpca-serve", http.StatusNotImplemented)
-	})
-	return logRequests(mux, log)
+	return logRequests(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/ocsp/") {
+			ocspResponder.ServeHTTP(w, r)
+			return
+		}
+		mux.ServeHTTP(w, r)
+	}), log)
 }
 
 func serveFile(root *os.Root, log *slog.Logger, dir, ext, contentType string) http.Handler {

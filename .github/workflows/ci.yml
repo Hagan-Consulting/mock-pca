@@ -38,6 +38,8 @@ jobs:
         with:
           go-version-file: go.mod
       - run: bash scripts/check.sh
+      - name: Fuzz the OCSP request decoder
+        run: go test -run '^$' -fuzz FuzzParseRequest -fuzztime 20s ./internal/ocsp/
 
   e2e:
     name: OpenSSL end-to-end
