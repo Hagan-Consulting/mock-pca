@@ -323,7 +323,8 @@ func (k *checker) stringType(name string, a attr) {
 
 func (k *checker) publicKey() {
 	const ref = "6.1.5 Table 7"
-	minRSA := map[Profile]int{PCA: 4096, ICA: 3072, Agency: 2048, Agent: 2048, Element: 2048, Service: 2048}
+	// OCSPResponder: CSS Certificate, at least 2048-bit RSA.
+	minRSA := map[Profile]int{PCA: 4096, ICA: 3072, Agency: 2048, Agent: 2048, Element: 2048, Service: 2048, OCSPResponder: 2048}
 	switch pub := k.c.PublicKey.(type) {
 	case *rsa.PublicKey:
 		if k.p == Signing {
