@@ -151,7 +151,7 @@ certificates it issued, the PCA for the ICAs. `mockpca-serve` is only the front 
 3. **Limits**: at most 4 OpenSSL processes at once; waiting for a slot plus the run is bounded by 10 seconds
    (`tryLater` when no slot frees up, `internalError` when OpenSSL fails). Malformed requests get `malformedRequest`,
    requests for a CA the PKI does not have `unauthorized`. The server never crashes on input.
-4. **Caching**: every signed response has thisUpdate and nextUpdate (`-nmin`, default 60 minutes) and RFC 5019 6.2
+4. **Caching**: every signed response has thisUpdate and nextUpdate (`-nmin`, default 60 minutes) and RFC 5019 6.2 (RFC 9919 7.2)
    headers: `Cache-Control: max-age=<nextUpdate − now>, public, no-transform, must-revalidate`, `Expires`,
    `Last-Modified`. Error and fault responses are sent with `Cache-Control: no-cache`.
 5. **Faults** (`ocsp-fault`): read from `ca/<ca>/ocsp-fault.conf` on every request, set only by the command, never

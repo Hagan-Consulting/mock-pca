@@ -82,7 +82,7 @@ of this profile; the rest is our interpretation, see [CP-NOTES.md](CP-NOTES.md) 
 |---|---|---|---|
 | Subject | `C, O=<the CA's O>, CN=ocsp.<CA iD>` | Tables 2, 36 (as End-Entities) | E |
 | Key / validity | RSA 2048 / 30 days (`ocsp-signer --days`), capped at the CA's notAfter | Table 7 (CSS ≥ 2048 RSA) | E below 2048 or non-RSA |
-| keyUsage | critical: digitalSignature only | 7.3, RFC 6960 4.2.2.2 | E |
+| keyUsage | critical: digitalSignature only | RFC 5280 4.2.1.3 | E |
 | extKeyUsage | critical: id-kp-OCSPSigning | 7.3, RFC 6960 4.2.2.2 | E |
 | id-pkix-ocsp-nocheck | non-critical, NULL | 7.3, RFC 6960 4.2.2.2.1 | E |
 | certificatePolicies | non-critical, `1.3.6.1.4.1.55670.1` | 4.10 (a CSS asserts the policy OIDs it is authoritative for) | E |
@@ -98,9 +98,9 @@ of this profile; the rest is our interpretation, see [CP-NOTES.md](CP-NOTES.md) 
 | Signer | the CA's delegated responder (default) or the CA key (`ocsp-signer --mode ca`) | 7.3 |
 | Signature | sha256WithRSAEncryption (`-rmd sha256`) | 7.1.3 |
 | CertID hashes | SHA-256 and SHA-1 answered | RFC 9919 3.1.1, RFC 5019 |
-| thisUpdate / nextUpdate | always; nextUpdate 60 minutes by default (`serve --ocsp-nmin`) | RFC 5019 2.2.4 |
-| Nonces | ignored (no nonce in responses) | RFC 5019 2.2.1 |
-| HTTP | GET (URL-encoded base64) and POST, `application/ocsp-response`, `Cache-Control: max-age` within nextUpdate | RFC 6960 A.1, RFC 5019 5, 6.2 |
+| thisUpdate / nextUpdate | always; nextUpdate 60 minutes by default (`serve --ocsp-nmin`) | RFC 5019 4 (RFC 9919 5) |
+| Nonces | ignored (no nonce in responses) | RFC 5019 2.2.1, 4 (RFC 9919 3.2.1, 5) |
+| HTTP | GET (URL-encoded base64) and POST, `application/ocsp-response`, `Cache-Control: max-age` within nextUpdate | RFC 6960 A.1, RFC 5019 5, 6.2 (RFC 9919 6, 7.2) |
 
 ## CRLs (`ca.cnf`)
 

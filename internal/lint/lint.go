@@ -275,12 +275,13 @@ func (k *checker) rules() map[string]extRule {
 		set(oidSIA, optional, false, "7.1.2.2 Table 15")
 		set(oidSKI, required, false, "7.1.2.2 Table 15")
 	case OCSPResponder:
-		// CP 7.3: id-pkix-ocsp-nocheck; key usage per RFC 6960 4.2.2.2; the
+		// CP 7.3: id-pkix-ocsp-nocheck; extKeyUsage id-kp-OCSPSigning per
+		// RFC 6960 4.2.2.2, keyUsage digitalSignature per RFC 5280 4.2.1.3; the
 		// rest as End-Entity Certificates where it applies (N21). No
 		// revocation pointers are needed (nocheck), so AIA/CDP are optional.
 		set(oidNoCheck, required, false, "7.3")
 		set(oidEKU, required, true, "7.3, RFC 6960 4.2.2.2")
-		set(oidKU, required, true, "7.3, RFC 6960 4.2.2.2")
+		set(oidKU, required, true, "RFC 5280 4.2.1.3")
 		set(oidAKI, required, false, "7.1.2.3 Table 16")
 		set(oidSKI, required, false, "7.1.2.3 Table 16")
 		set(oidSAN, required, false, "7.1.2.11")
@@ -385,7 +386,7 @@ func (k *checker) keyUsage() {
 	case Signing:
 		must, ref = x509.KeyUsageDigitalSignature, "6.1.7.2 Table 11"
 	case OCSPResponder:
-		must, ref = x509.KeyUsageDigitalSignature, "7.3, RFC 6960 4.2.2.2"
+		must, ref = x509.KeyUsageDigitalSignature, "RFC 5280 4.2.1.3"
 	}
 	got := k.c.KeyUsage
 	for _, n := range kuNames {
