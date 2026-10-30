@@ -73,6 +73,35 @@ also accepts P-384, P-521 and Ed25519 ("meet or exceed"). iPAddress entries are 
 TLS note: Agency and Agent certificates have neither keyEncipherment nor extKeyUsage. They work for TLS 1.3 and
 ECDHE key exchange in TLS 1.2 (signatures only), not for RSA key transport.
 
+## OCSP responder (`ocsp-responder.ext`)
+
+One delegated responder certificate per CA, issued by that CA (the PCA's answers for the ICAs). The CP fixes only part
+of this profile; the rest is our interpretation, see [CP-NOTES.md](CP-NOTES.md) N21.
+
+| Item | Value | CP | Lint |
+|---|---|---|---|
+| Subject | `C, O=<the CA's O>, CN=ocsp.<CA iD>` | Tables 2, 36 (as End-Entities) | E |
+| Key / validity | RSA 2048 / 30 days (`ocsp-signer --days`), capped at the CA's notAfter | Table 7 (CSS ≥ 2048 RSA) | E below 2048 or non-RSA |
+| keyUsage | critical: digitalSignature only | 7.3, RFC 6960 4.2.2.2 | E |
+| extKeyUsage | critical: id-kp-OCSPSigning | 7.3, RFC 6960 4.2.2.2 | E |
+| id-pkix-ocsp-nocheck | non-critical, NULL | 7.3, RFC 6960 4.2.2.2.1 | E |
+| certificatePolicies | non-critical, `1.3.6.1.4.1.55670.1` | 4.10 (a CSS asserts the policy OIDs it is authoritative for) | E |
+| subjectAltName | Quad ID `elementId/ocsp.<CA iD>/OCSPResponder/<CA owner>` | 7.1.2.11 | E |
+| SKI / AKI | Method 1 | Tables 32/33, 19/20 | E |
+| AIA / CDP | not included (nocheck: no revocation checking of the responder) | — | optional |
+| Issuer | the CA it answers for; the PCA may issue its own (CSS Certificates, 1.4.1) | 7.3 | E (signature, nesting) |
+
+## OCSP responses
+
+| Item | Value | CP / RFC |
+|---|---|---|
+| Signer | the CA's delegated responder (default) or the CA key (`ocsp-signer --mode ca`) | 7.3 |
+| Signature | sha256WithRSAEncryption (`-rmd sha256`) | 7.1.3 |
+| CertID hashes | SHA-256 and SHA-1 answered | RFC 9919 3.1.1, RFC 5019 |
+| thisUpdate / nextUpdate | always; nextUpdate 60 minutes by default (`serve --ocsp-nmin`) | RFC 5019 2.2.4 |
+| Nonces | ignored (no nonce in responses) | RFC 5019 2.2.1 |
+| HTTP | GET (URL-encoded base64) and POST, `application/ocsp-response`, `Cache-Control: max-age` within nextUpdate | RFC 6960 A.1, RFC 5019 5, 6.2 |
+
 ## CRLs (`ca.cnf`)
 
 | Item | Value | CP |

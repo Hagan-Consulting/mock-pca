@@ -2,7 +2,7 @@
 
 ## Goals
 
-- Produce certificates, CRLs and (later) OCSP responses that look like the NG9-1-1 PCA PKI's, per the NG9-1-1 PKI
+- Produce certificates, CRLs and OCSP responses that look like the NG9-1-1 PCA PKI's, per the NG9-1-1 PKI
   Certificate Policy v1.3, so relying-party software can be developed and tested without production certificates.
 - A hierarchy of any shape: one PCA root, Tier-2 and Tier-n ICAs, and any number of End-Entity certificates of every
   CP profile.
@@ -22,17 +22,19 @@ requirements in §5–6 are not imitated), registration-authority workflows, and
             └──────┬───────┘
                    │ writes
                    ▼
-            PKI directory ── www/ ──► mockpca-serve (HTTP) ──► relying parties
+            PKI directory ── www/ ──────► mockpca-serve (HTTP) ──► relying parties
+                          └─ ca/<ca>/ ──► /ocsp/<ca> ── openssl ocsp -reqin/-respout (per request)
 ```
 
-- **OpenSSL** (`openssl ca`) does all signing: certificates, CRLs and, in future, OCSP responses (#1). Its database
-  (`index.txt`) is the record of issued and revoked certificates.
+- **OpenSSL** does all signing: certificates and CRLs (`openssl ca`) and OCSP responses (`openssl ocsp`). Its
+  database (`index.txt`) is the record of issued and revoked certificates.
 - **`bin/mockpca`** validates input, builds the per-issuance OpenSSL configuration, runs OpenSSL, runs the linter,
   and assembles chains and published files.
 - **`mockpca-lint`** (`internal/lint`) checks a certificate against a CP profile. It reads the encoded extensions
   itself (criticality, exact key-usage bits, the otherName, DN string types) and uses `crypto/x509` only for parsing
   the envelope and verifying signatures.
-- **`mockpca-serve`** serves `www/` read-only. It does not sign anything.
+- **`mockpca-serve`** serves `www/` read-only and is the HTTP front end of the OCSP responders (`internal/ocsp`). It
+  does not sign anything itself.
 
 Go code uses the standard library only. A new module needs the product owner's approval (CLAUDE.md).
 
@@ -50,6 +52,10 @@ pki/
                                re-keyed name (written once the lint passed)
     index.txt crlnumber newcerts/  openssl ca database
     crl.pem                    current CRL (PEM)
+    ocsp/cert.pem key.pem      delegated OCSP responder certificate and key (+ csr.pem, issue.cnf)
+    ocsp/rogue-*.pem           self-signed rogue signer for the wrong-signer fault (created on demand)
+    ocsp.conf                  signer=delegated|ca (default delegated)
+    ocsp-fault.conf            injected OCSP faults (read by mockpca-serve on every request)
   ee/<name>/
     key.pem csr.pem cert.pem   key (absent for sign-csr), request, certificate
     chain.pem fullchain.pem    issuing chain without the PCA; cert + chain
@@ -129,6 +135,36 @@ mandatory and cannot be skipped. (`preserve = yes` above is a second example: ac
   `If-Modified-Since` is not used for 304 answers, because `http.ServeContent` compares it in whole seconds and would
   keep a client on a CRL republished within the same second.
 
+## OCSP
+
+Every CA answers OCSP at `<base>/ocsp/<ca>` (the URL in its certificates' AIA): an ICA for the End-Entity
+certificates it issued, the PCA for the ICAs. `mockpca-serve` is only the front end:
+
+1. **Decoding** (`internal/ocsp`): POST bodies (`application/ocsp-request`) and GET paths (RFC 6960 A.1: URL-encoded
+   base64, padding optional) up to 64 KiB. The DER is parsed as an OCSPRequest with `encoding/asn1` (at most 32
+   CertIDs) before OpenSSL sees it. The built-in `openssl ocsp -port` server was not used: in the feasibility study
+   one malformed request terminated it, it answered from a stale index, and its own man page calls it a test tool.
+2. **Signing**: one `openssl ocsp -index ca/<ca>/index.txt -CA ca/<ca>/ca.pem -rsigner … -rkey … -rmd sha256 -nmin N
+   -reqin … -respout …` run per request, so the database is read fresh and revocations show at once. SHA-1 and
+   SHA-256 CertIDs are answered (RFC 9919). The signer is the CA's delegated responder certificate (default) or the
+   CA key (`ocsp-signer --mode ca`; CA certificates assert digitalSignature, CP Table 8).
+3. **Limits**: at most 4 OpenSSL processes at once; waiting for a slot plus the run is bounded by 10 seconds
+   (`tryLater` when no slot frees up, `internalError` when OpenSSL fails). Malformed requests get `malformedRequest`,
+   requests for a CA the PKI does not have `unauthorized`. The server never crashes on input.
+4. **Caching**: every signed response has thisUpdate and nextUpdate (`-nmin`, default 60 minutes) and RFC 5019 6.2
+   headers: `Cache-Control: max-age=<nextUpdate − now>, public, no-transform, must-revalidate`, `Expires`,
+   `Last-Modified`. Error and fault responses are sent with `Cache-Control: no-cache`.
+5. **Faults** (`ocsp-fault`): read from `ca/<ca>/ocsp-fault.conf` on every request, set only by the command, never
+   by request input. HTTP status, delay (≤ 25 s), fixed unsigned error statuses, SHA-1 only (`unauthorized` for any
+   other CertID hash, for RFC 9919 fallback clients), stale (the first response, valid for one minute, is replayed
+   unchanged; the server keeps up to 1024 in memory), wrong signer (a self-signed rogue certificate outside the PKI)
+   and unknown (OpenSSL answers from an empty database, so the response is properly signed).
+6. **Responder certificates** (`profiles/ocsp-responder.ext`, CP-NOTES N21): issued with every CA (RSA 2048, 30 days,
+   capped at the CA's notAfter), checked by `mockpca-lint -profile ocsp-responder`; `ocsp-signer --rotate` replaces one
+   and revokes the old one; `mockpca serve` renews those that expire within 7 days.
+7. **Stapling**: `ocsp-response --ee NAME` writes a fresh response signed the same way, for servers that load
+   staples from files.
+
 ## Platforms
 
 Supported: Linux and macOS (bash ≥ 4.4 and OpenSSL 3 from a package manager). Windows users run the tool under WSL;
@@ -151,12 +187,13 @@ Only Linux has been tested so far. Running `scripts/e2e.sh` on macOS is an open 
 - `mockpca-serve`:
   - serves only names matching `<ca>.cer`/`<ca>.crl`, opened through `os.Root`, so symbolic links cannot escape
     `www/`
-  - accepts GET/HEAD only, has timeouts on every server phase, and caps header size
+  - accepts GET/HEAD for files and GET/POST for OCSP, has timeouts on every server phase, and caps header size
+  - OCSP: CA names are checked against the names `mockpca` creates before any path is built; requests are parsed
+    before OpenSSL sees them and written to a private temporary directory; OpenSSL runs without a shell and with
+    `OPENSSL_CONF=/dev/null`; the request decoder is fuzz-tested
 
 ## Planned
 
-- OCSP responder, delegated responder certificates, stapling files and fault injection:
-  [#1](https://github.com/Hagan-Consulting/mock-pca/issues/1).
 - Deliberately non-conforming certificates (negative test fixtures): expired, not yet valid, missing CDP/AIA, wrong
   policy, extKeyUsage on Agency certificates. Today `scripts/e2e.sh` builds one ad hoc to test the linter.
 - Comparing the mock profiles with the published production PCA and ICA certificates (CP Table 1:

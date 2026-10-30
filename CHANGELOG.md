@@ -19,7 +19,11 @@ All notable changes to this project are documented in this file. The format is b
   exponent, key usage and extKeyUsage, validity, every §7.1.2 extension, the Quad ID, and (given the issuer)
   signature, AKI, nesting and End-Entities issued by the PCA; `-root` accepts NIOC Agency Certificates.
 - `mockpca-serve`: HTTP publication of CA certificates and CRLs at the URLs in the certificates, revalidated by a
-  content ETag (OCSP: 501, see #1).
+  content ETag.
+- OCSP responders for every mock CA (#1): `mockpca-serve -pki` answers GET and POST at `/ocsp/<ca>` (SHA-1 and
+  SHA-256 CertIDs, responses signed by OpenSSL per request, RFC 5019 caching headers); delegated responder
+  certificates issued with every CA (`ocsp-responder` profile, also in `mockpca-lint`) or CA-signed responses
+  (`mockpca ocsp-signer`); fault injection per CA (`mockpca ocsp-fault`); stapling files (`mockpca ocsp-response`).
 - `examples/demo.sh` sample hierarchy, `scripts/e2e.sh` OpenSSL end-to-end test, design, profile and CP notes docs.
 - Repository scaffold: Go module (standard library only), checks, CI and Dependabot configuration. Supported
   platforms: Linux and macOS; Windows through WSL (Git Bash is not supported).
