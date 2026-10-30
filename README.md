@@ -42,8 +42,8 @@ see an OCSP failure and fall back to CRLs.
 | Go | 1.27.3 (`go.mod`) | builds `mockpca-lint` and `mockpca-serve` from this checkout on first use |
 | curl | any | only for `scripts/e2e.sh` |
 
-Tested on Linux. macOS (Homebrew bash and OpenSSL) and Windows Git Bash are intended to work but have not been
-tested yet; see [docs/DESIGN.md](docs/DESIGN.md#platforms).
+Supported: Linux and macOS (Homebrew bash and OpenSSL); on Windows, use WSL. Git Bash is not supported. Tested on
+Linux so far; see [docs/DESIGN.md](docs/DESIGN.md#platforms).
 
 ## Quick start
 
@@ -83,19 +83,26 @@ mockpca [--pki DIR] COMMAND [options]       (PKI directory: --pki, else $MOCKPCA
 |---|---|
 | `init --base-url URL --id FQDN` | Create the PKI directory and the PCA root (RSA 4096, 10 years). `--org`, `--country`, `--cn`, `--ou-serial`, `--days`. |
 | `ica --name N --parent CA --id FQDN --owner AGENCY_ID --org ORG --label LABEL` | Create an ICA (RSA 3072, ≤ 3 years). CN becomes `<LABEL> ICA Tier<n>`. `--pathlen` (Tier-2: 0–3, default 1; Tier-n: the issuer's minus one), `--st`, `--l`, `--country`, `--ou-serial`, `--days`. |
-| `issue --ca CA --profile P --name N --id ID --roles R1,R2 --org ORG` | Generate a key and issue an End-Entity certificate. Profiles: `agency`, `agent`, `element`, `service`, `signing`. `--owner` (required except for agency), `--dns` and `--ip` (repeatable), `--ou`, `--st`, `--l`, `--country`, `--days` (default 90), `--key rsa:2048\|rsa:3072\|rsa:4096\|ec:P-256\|ec:P-384\|ec:P-521`, `--id-type` (signing only). |
-| `sign-csr … --csr FILE` | Like `issue`, for a key generated elsewhere (the CP has Subscribers generate their own keys). The CA sets subject and extensions; nothing is copied from the CSR. |
-| `revoke --ee N \| --ca N [--reason R]` | Revoke an End-Entity certificate or an ICA and republish the issuer's CRL. |
-| `crl --ca N \| --all [--hours H \| --seconds S]` | Regenerate CRLs (default lifetime 24 h, CP Table 3). Short lifetimes produce stale CRLs for testing. |
+| `issue --ca CA --profile P --name N --id ID --roles R1,R2 --org ORG` | Generate a key and issue an End-Entity certificate. Profiles: `agency`, `agent`, `element`, `service`, `signing`. `--owner` (required except for agency), `--dns` and `--ip` (repeatable), `--ou`, `--st`, `--l`, `--country`, `--days` (default 90), `--key rsa:2048\|rsa:3072\|rsa:4096\|ec:P-256\|ec:P-384\|ec:P-521`, `--id-type` (signing only), `--renew NAME` (renewal or re-key of NAME: same subject DN and Quad ID). Only ICAs issue End-Entity certificates. |
+| `sign-csr … --csr FILE` | Like `issue`, for a key generated elsewhere (the CP has Subscribers generate their own keys). The CA sets subject and extensions; nothing is copied from the CSR. The CSR's key must meet the profile (CP 6.1.6, Table 7). |
+| `revoke --ee N \| --ca N [--reason R]` | Revoke an End-Entity certificate or an ICA and republish the issuer's CRL. Reasons: `unspecified`, `keyCompromise`, `CACompromise`, `affiliationChanged`, `superseded`, `cessationOfOperation` (no `certificateHold`: the CP does not support suspension, 4.9.13). |
+| `crl --ca N \| --all [--hours H \| --seconds S]` | Regenerate CRLs (default lifetime 24 h, CP Table 3). Short lifetimes produce stale CRLs for testing. Longer than 24 h is allowed for testing, with a warning. |
 | `verify --ee N \| --ca N [--no-crl]` | `openssl verify` with `-x509_strict`, the CP policy OID (`-explicit_policy`) and all CRLs. |
 | `list` | All CAs and certificates with status (V valid, R revoked, E expired). |
 | `lint [flags] FILE…` | Run `mockpca-lint`. |
-| `serve [--listen ADDR] [--crl-hours H]` | Serve `pki/www` and republish CRLs every H/2 hours. |
+| `serve [--listen ADDR] [--crl-hours H]` | Serve `pki/www` and republish CRLs every H/2 hours. More than 48 hours (republishing less often than daily, CP Table 3) is allowed for testing, with a warning. |
 
-Rules the tool enforces:
+By default the tool does not produce CP violations. It enforces:
+- Every certificate passes `mockpca-lint`. One that fails is revoked in its issuer's CRL and moved to `pki/rejected/`;
+  nothing usable is left behind.
+- Only ICAs issue End-Entity certificates (CP 1.4.1). A revoked CA, or a CA below a revoked ICA, cannot issue.
+- Subject DNs and Quad IDs are unique in the PKI (CP 3.1.5, 7.1.2.11); `--renew` is the exception for renewal and
+  re-key.
 - The Quad ID iD is also the subject CN, so it can be at most 64 characters (RFC 5280).
-- Agency, Element and Service certificates always get the iD as their first dNSName (CP Table 30).
-- An Agency certificate's owner is its own iD (CP Table 28).
+- The iD is the first dNSName: always for Agency, Element and Service certificates, and for Agent and Signing
+  certificates when they have dNSNames (CP Table 30). An agent iD of the form `user@fqdn` therefore cannot have any.
+- An Agency certificate's owner is its own iD, or the PCA's iD for a NIOC Agency Certificate (CP Table 28).
+- Subject attributes are in the CP table order (C, O, OU, ST, L, CN for ICAs; C, O, L, ST, OU, CN for End-Entities).
 - Validity is capped at the issuer's notAfter.
 
 ### Revocation testing recipes
@@ -115,11 +122,12 @@ bin/mockpca lint -issuer issuing-ca.pem cert.pem
 ```
 
 ```bash
-bin/mockpca lint fullchain.pem
+bin/mockpca lint -root pki/trust/pca.pem fullchain.pem
 ```
 
 - The profile is detected from the Quad ID, or given with `-profile`.
 - With a full chain, the second certificate is used as the issuer.
+- `-root` gives the PCA certificate, which lets the linter accept NIOC Agency Certificates (owner = the PCA's iD).
 - Findings name the CP section/table. `ERROR` is a violated SHALL/MUST. `WARN` is a SHOULD, or content outside the
   CP profile.
 - Exit status: 1 on errors (or on warnings with `-strict`), 2 on usage errors.

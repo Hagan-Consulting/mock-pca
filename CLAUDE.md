@@ -31,10 +31,15 @@ attack surface.
 - Never disable TLS verification, checksum or signature checks to make something work; stop and ask instead.
 
 ## Conventions
-- `bin/mockpca` is a single bash script (bash ≥ 4, `set -euo pipefail`). It must run on Linux, macOS (with OpenSSL 3
-  from a package manager, not the system LibreSSL) and Git Bash on Windows: no GNU-only tool flags, no `-subj` on the
-  OpenSSL command line (Git Bash rewrites arguments that start with `/`), DNs and extensions go through generated
-  config files. Validate every user input before it reaches a config file (no newlines, no `/` in Quad ID fields).
+- `bin/mockpca` is a single bash script (bash ≥ 4.4, `set -euo pipefail`). It must run on Linux and macOS (with
+  OpenSSL 3 from a package manager, not the system LibreSSL); Windows users run it under WSL (Git Bash is not
+  supported). No GNU-only tool flags. Extensions go through generated config files; subject DNs are passed with
+  `-subj` (the only way to set the subject of an external CSR), and every DN value is validated (`check_dn`) and
+  escaped (`subj_escape`). Validate every user input before it reaches OpenSSL (no newlines, no `/` in Quad ID
+  fields).
+- OpenSSL ignores configuration it does not know or apply without an error (seen twice: an unknown directive, and
+  `preserve = yes` in `openssl ca`). Prefer command-line flags for behaviour that matters, and cover it with an e2e
+  check.
 - Go: small packages, `context.Context` first on I/O, errors wrapped with `%w`, `log/slog` for logging, timeouts on
   every server. Tests: stdlib `testing`, table-driven, `t.Parallel()` where safe, `httptest`.
 - Verify before committing: `scripts/check.sh` (gofmt, `go vet`, `go test -race ./...`) and `scripts/e2e.sh`

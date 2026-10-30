@@ -15,12 +15,15 @@ enforces (E = error, W = warning). Interpretations of unclear CP text are in [CP
 | authorityKeyIdentifier | non-critical, keyIdentifier only, Method 1 (not in the PCA) | Tables 19/20 | E; W if issuer/serial present |
 | subjectAltName | non-critical; exactly one Quad ID `otherName` `1.3.6.1.4.1.55670.1.1` as UTF8String `idType/iD/roles/owner` | 7.1.2.11, Tables 29/30 | E |
 | Unknown extensions | none | 7.1.2 | E if critical, W otherwise |
+| Subject attribute order | as in the CP tables (below) | Tables 2, 34–36 | W |
+| RSA public exponent | 65537 (odd, > 2^16) | 6.1.6 (FIPS 186-4) | E |
+| Uniqueness | subject DN and Quad ID unique in the PKI (`--renew` exempt) | 3.1.5, 7.1.2.11 | tool only |
 
 ## PCA (`pca.ext`)
 
 | Item | Value | CP |
 |---|---|---|
-| Subject | `[C=US] O=MOCK NG911 PCA - NOT FOR PRODUCTION, OU=PCA-<n>, CN=PCA Root` | Table 2, Table 34 |
+| Subject | `[C=US], O=MOCK NG911 PCA - NOT FOR PRODUCTION, OU=PCA-<n>, CN=PCA Root` (lint: OU `PCA-<digits>`) | Table 2, Table 34 |
 | Key / validity | RSA 4096 / 10 years (3650 days) | Table 7, Table 12 |
 | basicConstraints | critical, cA, no pathLenConstraint | Table 21 |
 | keyUsage | critical: digitalSignature, keyCertSign, cRLSign | Table 8 |
@@ -31,7 +34,7 @@ enforces (E = error, W = warning). Interpretations of unclear CP text are in [CP
 
 | Item | Value | CP |
 |---|---|---|
-| Subject | `C, [ST], [L], O, OU=ICA-<n>, CN=<label> ICA Tier<n>` | Table 2, Table 35 |
+| Subject | `C, O, OU=ICA-<n>, [ST], [L], CN=<label> ICA Tier<n>` (Table 2 order; lint also accepts Table 35's C, O, OU, L, ST, CN, and `Tier<n>`, `Tier <n>`, `Tier-<n>` with n = issuer's tier + 1) | Table 2, Table 35, 3.1.2 |
 | Key / validity | RSA 3072 / up to 3 years, capped at the issuer's notAfter | Table 7, Table 12, 6.3.2 |
 | basicConstraints | critical, cA; pathLenConstraint 0–3 under the PCA, else the issuer's minus one | Tables 22/23 |
 | keyUsage | critical: digitalSignature, keyCertSign, cRLSign | Table 8 |
@@ -47,17 +50,18 @@ All End-Entity profiles share:
 
 | Item | Value | CP |
 |---|---|---|
-| Subject | `C, [ST], [L], O, [OU], CN=<iD>` | Table 36 |
+| Subject | `C, O, [L], [ST], [OU], CN=<iD>` | Tables 2, 36 |
+| Issuer | an ICA, never the PCA (lint: E) | 1.4.1 |
 | Validity | default 90 days; ≤ 3 years (lint: W above 3 months and 1 year) | Table 12, 6.3.2 |
 | authorityInfoAccess | non-critical, caIssuers `<base>/certs/<ca>.cer` and OCSP `<base>/ocsp/<ca>` | Table 18 |
 | cRLDistributionPoints | non-critical, `<base>/crl/<ca>.crl` | Table 25 |
 | certificatePolicies | non-critical, `1.3.6.1.4.1.55670.1`, no qualifiers | Table 38, 7.1.8 |
-| Quad ID owner | the iD of the Agency controlling the entity; an Agency certificate's own iD | Table 28 |
+| Quad ID owner | the iD of the Agency controlling the entity; an Agency certificate's own iD, or the PCA's iD for a NIOC Agency Certificate | Table 28 |
 
 | Profile | idType | Key (default) | keyUsage (critical) | extKeyUsage (critical) | dNSName |
 |---|---|---|---|---|---|
 | `agency` | agencyId | RSA 2048 | digitalSignature, nonRepudiation (Table 9) | none (7.1.2.9) | required, first = iD |
-| `agent` | agentId | RSA 2048 | digitalSignature, nonRepudiation (Table 9) | none (7.1.2.9) | optional |
+| `agent` | agentId | RSA 2048 | digitalSignature, nonRepudiation (Table 9) | none (7.1.2.9) | optional; first = iD if present (so only with an FQDN iD) |
 | `element` | elementId | RSA 2048 | digitalSignature, keyEncipherment (Table 10) | serverAuth, clientAuth (Table 26) | required, first = iD |
 | `service` | serviceId | RSA 2048 | digitalSignature, keyEncipherment (Table 10) | serverAuth, clientAuth (Table 26) | required, first = iD |
 | `signing` | elementId (`--id-type`) | ECDSA P-256 | digitalSignature (Table 11) | codeSigning (Table 27) | optional; first = iD if present |
