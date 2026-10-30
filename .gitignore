@@ -1,0 +1,7 @@
+# Generated PKI material (private keys!) never goes into the repository.
+/pki/
+*.key
+*.p12
+*.pfx
+# Local build output.
+/.build/

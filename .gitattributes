@@ -1,0 +1,4 @@
+# Shell scripts must keep LF line endings, also on Windows checkouts (Git Bash).
+*.sh text eol=lf
+bin/mockpca text eol=lf
+profiles/* text eol=lf
