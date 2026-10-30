@@ -15,6 +15,8 @@ import (
 	"math/big"
 	"net/http"
 	"net/url"
+	"regexp"
+	"strings"
 )
 
 // MaxRequestSize is the largest OCSP request accepted (POST body or decoded
@@ -129,6 +131,15 @@ func ReadRequest(r *http.Request, escapedRest string) ([]byte, []CertID, error) 
 	return der, ids, nil
 }
 
+// base64Repertoire is the alphabet of RFC 4648 section 4 with its padding.
+var base64Repertoire = regexp.MustCompile(`^[A-Za-z0-9+/]*={0,2}$`)
+
+// decodeGET decodes a GET request strictly (the tool is a test target:
+// clients that do not follow the RFCs fail visibly). RFC 9919 section 6: the
+// request is base64 per RFC 4648 section 4, with nothing outside its
+// alphabet, and URL-encoded per RFC 3986, where '/' separates path segments
+// and so must be sent as %2F. RFC 4648 section 3.2: padding is required.
+// Raw '+' and '=' are sub-delims, valid unescaped in a path.
 func decodeGET(escaped string) ([]byte, error) {
 	if escaped == "" {
 		return nil, fmt.Errorf("%w: GET without a request", ErrMalformed)
@@ -137,17 +148,19 @@ func decodeGET(escaped string) ([]byte, error) {
 	if len(escaped) > 3*base64.StdEncoding.EncodedLen(MaxRequestSize) {
 		return nil, errTooLarge
 	}
+	if strings.Contains(escaped, "/") {
+		return nil, fmt.Errorf("%w: unescaped '/' in GET request (RFC 9919 6, RFC 3986)", ErrMalformed)
+	}
 	s, err := url.PathUnescape(escaped)
 	if err != nil {
 		return nil, fmt.Errorf("%w: URL encoding: %v", ErrMalformed, err)
 	}
-	der, err := base64.StdEncoding.DecodeString(s)
+	if !base64Repertoire.MatchString(s) {
+		return nil, fmt.Errorf("%w: characters outside the base64 alphabet in GET request (RFC 9919 6)", ErrMalformed)
+	}
+	der, err := base64.StdEncoding.Strict().DecodeString(s)
 	if err != nil {
-		// Some clients drop the padding.
-		var err2 error
-		if der, err2 = base64.RawStdEncoding.DecodeString(s); err2 != nil {
-			return nil, fmt.Errorf("%w: base64: %v", ErrMalformed, err)
-		}
+		return nil, fmt.Errorf("%w: base64 with padding required (RFC 4648 3.2, 4): %v", ErrMalformed, err)
 	}
 	if len(der) > MaxRequestSize {
 		return nil, errTooLarge

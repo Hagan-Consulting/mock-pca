@@ -2,6 +2,7 @@ package ocsp
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"crypto/x509/pkix"
 	"encoding/asn1"
 	"encoding/base64"
@@ -68,8 +69,7 @@ func TestParseRequest(t *testing.T) {
 
 func TestReadRequest(t *testing.T) {
 	t.Parallel()
-	der := buildRequest(t, OIDSHA256)
-	b64 := base64.StdEncoding.EncodeToString(der)
+	der, b64 := requestWithAllChars(t)
 	tests := []struct {
 		name   string
 		method string
@@ -81,8 +81,12 @@ func TestReadRequest(t *testing.T) {
 		{"POST too large", "POST", make([]byte, MaxRequestSize+1), "", false},
 		{"POST garbage", "POST", []byte("x"), "", false},
 		{"GET escaped", "GET", nil, url.PathEscape(b64), true},
-		{"GET unescaped slashes and plus", "GET", nil, b64, true},
-		{"GET without padding", "GET", nil, strings.TrimRight(b64, "="), true},
+		{"GET %2F, raw + and =", "GET", nil, strings.ReplaceAll(b64, "/", "%2F"), true},
+		{"GET raw /", "GET", nil, "MAo/MAo=", false},
+		{"GET raw //", "GET", nil, "MAo//MAo=", false},
+		{"GET without padding", "GET", nil, "MAo", false},
+		{"GET whitespace", "GET", nil, "MAo%0A=", false},
+		{"GET non-zero padding bits", "GET", nil, "MAp=", false},
 		{"GET bad base64", "GET", nil, "%%%", false},
 		{"GET not base64", "GET", nil, "not*base64", false},
 		{"GET empty", "GET", nil, "", false},
@@ -105,6 +109,34 @@ func TestReadRequest(t *testing.T) {
 	if _, _, err := ReadRequest(r, url.PathEscape(b64)); err != nil {
 		t.Errorf("GET with a body: %v", err)
 	}
+}
+
+// requestWithAllChars returns a request whose base64 contains '+', '/' and
+// '=', so that the GET cases exercise all three.
+func requestWithAllChars(t *testing.T) ([]byte, string) {
+	t.Helper()
+	for n := 1; n < 5000; n++ {
+		der := buildRequest(t, OIDSHA256)
+		// Vary the serial number until the encoding has every character.
+		var req ocspRequest
+		if _, err := asn1.Unmarshal(der, &req); err != nil {
+			t.Fatal(err)
+		}
+		c := &req.TBSRequest.RequestList[0].ReqCert
+		h := sha256.Sum256([]byte{byte(n), byte(n >> 8)})
+		c.IssuerNameHash, c.IssuerKeyHash = h[:20], h[12:]
+		c.SerialNumber = new(big.Int).Lsh(big.NewInt(int64(n)), uint(n%17))
+		der, err := asn1.Marshal(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b64 := base64.StdEncoding.EncodeToString(der)
+		if strings.Contains(b64, "+") && strings.Contains(b64, "/") && strings.HasSuffix(b64, "=") {
+			return der, b64
+		}
+	}
+	t.Fatal("no request encodes to base64 with '+', '/' and '='")
+	return nil, ""
 }
 
 func TestErrorResponse(t *testing.T) {

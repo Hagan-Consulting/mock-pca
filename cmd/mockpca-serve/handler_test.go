@@ -1,6 +1,9 @@
 package main
 
 import (
+	"bytes"
+	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -10,6 +13,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/hagan-consulting/mock-pca/internal/ocsp"
 )
 
 func newTestServer(t *testing.T) (*httptest.Server, string) {
@@ -168,6 +173,88 @@ func TestRevalidation(t *testing.T) {
 		}
 		if resp.Header.Get("ETag") == etag {
 			t.Errorf("%v: ETag unchanged after republishing", hdr)
+		}
+	}
+}
+
+// noRedirect is a client that reports redirects instead of following them.
+func noRedirect(srv *httptest.Server) *http.Client {
+	c := *srv.Client()
+	c.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	return &c
+}
+
+// TestOCSPBypassesPathCleaning: an OCSP GET with "//" reaches the responder
+// unchanged, instead of being redirected by the ServeMux.
+func TestOCSPBypassesPathCleaning(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { root.Close() })
+	var seen string
+	stub := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = r.URL.EscapedPath()
+		w.WriteHeader(http.StatusTeapot)
+	})
+	srv := httptest.NewServer(newHandler(root, stub, slog.New(slog.DiscardHandler)))
+	t.Cleanup(srv.Close)
+	resp, err := noRedirect(srv).Get(srv.URL + "/ocsp/county/MAo//MAo=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusTeapot || seen != "/ocsp/county/MAo//MAo=" {
+		t.Errorf("status %d, responder saw %q", resp.StatusCode, seen)
+	}
+}
+
+// failRunner fails every openssl run: the strict GET checks answer before
+// anything is signed.
+type failRunner struct{}
+
+func (failRunner) Run(context.Context, ...string) ([]byte, error) {
+	return nil, errors.New("no openssl")
+}
+
+// TestStrictGET goes through newHandler and the real responder: an
+// unescaped '/' or "//" and missing padding are malformedRequest, never a
+// redirect.
+func TestStrictGET(t *testing.T) {
+	t.Parallel()
+	pki := t.TempDir()
+	for _, d := range []string{"www", "ca/county"} {
+		if err := os.MkdirAll(filepath.Join(pki, d), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(pki, "ca/county/ca.conf"), []byte("profile=ica\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(filepath.Join(pki, "www"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { root.Close() })
+	log := slog.New(slog.DiscardHandler)
+	responder, err := ocsp.New(ocsp.Config{PKI: pki, NMin: 60, Runner: failRunner{}, Log: log})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(newHandler(root, responder, log))
+	t.Cleanup(srv.Close)
+	malformed := ocsp.ErrorResponse(ocsp.StatusMalformedRequest)
+	for _, path := range []string{"/ocsp/county/MAo/MAo=", "/ocsp/county/MAo//MAo=", "/ocsp/county/MAo"} {
+		resp, err := noRedirect(srv).Get(srv.URL + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK || !bytes.Equal(body, malformed) {
+			t.Errorf("GET %s: status %d, body %x; want malformedRequest", path, resp.StatusCode, body)
 		}
 	}
 }
