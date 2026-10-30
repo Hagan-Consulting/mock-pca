@@ -278,7 +278,8 @@ func (k *checker) rules() map[string]extRule {
 		// CP 7.3: id-pkix-ocsp-nocheck; extKeyUsage id-kp-OCSPSigning per
 		// RFC 6960 4.2.2.2, keyUsage digitalSignature per RFC 5280 4.2.1.3; the
 		// rest as End-Entity Certificates where it applies (N21). No
-		// revocation pointers are needed (nocheck), so AIA/CDP are optional.
+		// revocation pointers are needed (nocheck): RFC 5019 2.2.2 and
+		// RFC 9919 3.2.2 recommend neither AIA nor CDP, so either is a warning.
 		set(oidNoCheck, required, false, "7.3")
 		set(oidEKU, required, true, "7.3, RFC 6960 4.2.2.2")
 		set(oidKU, required, true, "RFC 5280 4.2.1.3")
@@ -286,8 +287,8 @@ func (k *checker) rules() map[string]extRule {
 		set(oidSKI, required, false, "7.1.2.3 Table 16")
 		set(oidSAN, required, false, "7.1.2.11")
 		set(oidCP, required, false, "4.10")
-		set(oidAIA, optional, false, "7.1.2.3 Table 16")
-		set(oidCDP, optional, false, "7.1.2.3 Table 16")
+		set(oidAIA, unexpected, false, "RFC 5019 2.2.2")
+		set(oidCDP, unexpected, false, "RFC 5019 2.2.2")
 		set(oidBC, unexpected, false, "7.1.2.3 Table 16")
 	default:
 		set(oidAIA, required, false, "7.1.2.3 Table 16")

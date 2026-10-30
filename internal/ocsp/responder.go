@@ -136,7 +136,7 @@ func (rs *Responder) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(f.httpStatus)
 		return
 	case f.status != 0:
-		rs.write(w, ErrorResponse(f.status), 0)
+		rs.writeError(w, ErrorResponse(f.status))
 		return
 	case f.sha1Only && !allSHA1(ids):
 		rs.error(w, StatusUnauthorized, "sha1-only fault: SHA-256 CertID", "ca", ca)
@@ -151,7 +151,7 @@ func (rs *Responder) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		cached, ok := rs.stale[key]
 		rs.mu.Unlock()
 		if ok {
-			rs.write(w, cached, 0)
+			rs.writeSigned(w, cached, ca)
 			return
 		}
 		nmin = 1 // the replayed response is past its nextUpdate after a minute
@@ -172,10 +172,8 @@ func (rs *Responder) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		rs.stale[key] = resp
 		rs.mu.Unlock()
-		rs.write(w, resp, 0)
-		return
 	}
-	rs.write(w, resp, nmin)
+	rs.writeSigned(w, resp, ca)
 }
 
 func allSHA1(ids []CertID) bool {
@@ -219,7 +217,7 @@ func (rs *Responder) sign(ctx context.Context, caDir string, der []byte, f fault
 			return nil, err
 		}
 	}
-	signer, key, err := signerFiles(caDir, f.wrongSigner)
+	signer, key, err := signerFiles(caDir, f)
 	if err != nil {
 		return nil, err
 	}
@@ -235,12 +233,18 @@ func (rs *Responder) sign(ctx context.Context, caDir string, der []byte, f fault
 	return os.ReadFile(respFile)
 }
 
-// signerFiles returns the signing certificate and key of a CA's responder.
-func signerFiles(caDir string, wrongSigner bool) (cert, key string, err error) {
+// signerFiles returns the signing certificate and key of a CA's responder,
+// or the negative fixture a fault asks for.
+func signerFiles(caDir string, f faults) (cert, key string, err error) {
 	ocspDir := filepath.Join(caDir, "ocsp")
 	switch {
-	case wrongSigner:
+	case f.wrongSigner:
 		cert, key = filepath.Join(ocspDir, "rogue-cert.pem"), filepath.Join(ocspDir, "rogue-key.pem")
+	case f.noNoCheck:
+		// Issued by the CA, but without id-pkix-ocsp-nocheck (made by
+		// `mockpca ocsp-fault --no-nocheck`).
+		d := filepath.Join(ocspDir, "negative-no-nocheck")
+		cert, key = filepath.Join(d, "cert.pem"), filepath.Join(d, "key.pem")
 	default:
 		mode, err := readKV(filepath.Join(caDir, "ocsp.conf"))
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -263,19 +267,42 @@ func signerFiles(caDir string, wrongSigner bool) (cert, key string, err error) {
 	return cert, key, nil
 }
 
-// write sends a response. nmin > 0 marks a fresh response valid for nmin
-// minutes (RFC 5019 6.2 caching headers); 0 means do not cache.
-func (rs *Responder) write(w http.ResponseWriter, resp []byte, nmin int) {
+// writeSigned sends a signed response with the caching headers of RFC 9919
+// sections 6 and 7.2 (RFC 5019 5, 6.2), taken from the response itself:
+// Last-Modified is its thisUpdate, Expires its nextUpdate, max-age ends
+// before nextUpdate (0 once it has passed, as for a replayed stale
+// response), and the ETag is the hex SHA-256 of the response. Authoritative
+// responses never carry no-cache. A response whose times cannot be read is
+// not sent: the client gets internalError.
+func (rs *Responder) writeSigned(w http.ResponseWriter, resp []byte, ca string) {
+	thisUpdate, nextUpdate, err := validity(resp)
+	if err != nil {
+		rs.error(w, StatusInternalError, "signed response unreadable", "ca", ca, "err", err)
+		return
+	}
+	maxAge := int64(nextUpdate.Sub(rs.cfg.Now())/time.Second) - 1
+	if maxAge < 0 {
+		maxAge = 0
+	}
+	sum := sha256.Sum256(resp)
+	h := w.Header()
+	h.Set("Cache-Control", fmt.Sprintf("max-age=%d, public, no-transform, must-revalidate", maxAge))
+	h.Set("Last-Modified", thisUpdate.UTC().Format(http.TimeFormat))
+	h.Set("Expires", nextUpdate.UTC().Format(http.TimeFormat))
+	h.Set("ETag", `"`+hex.EncodeToString(sum[:])+`"`)
+	send(w, resp)
+}
+
+// writeError sends an unsigned error response; it is not authoritative and
+// must not be cached.
+func (rs *Responder) writeError(w http.ResponseWriter, resp []byte) {
+	w.Header().Set("Cache-Control", "no-cache")
+	send(w, resp)
+}
+
+func send(w http.ResponseWriter, resp []byte) {
 	h := w.Header()
 	h.Set("Content-Type", "application/ocsp-response")
-	if nmin > 0 {
-		now := rs.cfg.Now().UTC()
-		h.Set("Cache-Control", fmt.Sprintf("max-age=%d, public, no-transform, must-revalidate", nmin*60))
-		h.Set("Last-Modified", now.Format(http.TimeFormat))
-		h.Set("Expires", now.Add(time.Duration(nmin)*time.Minute).Format(http.TimeFormat))
-	} else {
-		h.Set("Cache-Control", "no-cache")
-	}
 	h.Set("Content-Length", strconv.Itoa(len(resp)))
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(resp)
@@ -287,7 +314,7 @@ func (rs *Responder) error(w http.ResponseWriter, status int, msg string, args .
 		level = slog.LevelWarn
 	}
 	rs.cfg.Log.Log(context.Background(), level, "ocsp: "+msg, append(args, "response_status", status)...)
-	rs.write(w, ErrorResponse(status), 0)
+	rs.writeError(w, ErrorResponse(status))
 }
 
 // faults is the fault injection configured for a CA (ocsp-fault.conf, set
@@ -299,6 +326,7 @@ type faults struct {
 	sha1Only    bool
 	stale       bool
 	wrongSigner bool
+	noNoCheck   bool
 	unknown     bool
 }
 
@@ -353,6 +381,8 @@ func readFaults(path string) (faults, error) {
 			f.stale = v == "1"
 		case "wrong_signer":
 			f.wrongSigner = v == "1"
+		case "no_nocheck":
+			f.noNoCheck = v == "1"
 		case "unknown":
 			f.unknown = v == "1"
 		default:

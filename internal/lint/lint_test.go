@@ -496,6 +496,12 @@ func TestViolations(t *testing.T) {
 			c.KeyUsage |= x509.KeyUsageKeyEncipherment
 		}, nil, Error, "keyEncipherment is set"},
 		{"responder with an ECC key", OCSPResponder, &k.ec.PublicKey, nil, nil, Error, "SHALL use an RSA key"},
+		{"responder with AIA", OCSPResponder, nil, func(t *testing.T, c *x509.Certificate) {
+			c.OCSPServer = []string{base + "/ocsp/ica3"}
+		}, nil, Warn, "extension authorityInfoAccess is not in the CP profile"},
+		{"responder with CDP", OCSPResponder, nil, func(t *testing.T, c *x509.Certificate) {
+			c.CRLDistributionPoints = []string{base + "/crl/ica3.crl"}
+		}, nil, Warn, "extension cRLDistributionPoints is not in the CP profile"},
 		{"EE asserts cA", Agent, nil, func(t *testing.T, c *x509.Certificate) {
 			c.BasicConstraintsValid, c.IsCA = true, true
 		}, nil, Error, "asserts cA"},
