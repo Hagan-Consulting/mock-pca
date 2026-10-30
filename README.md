@@ -83,6 +83,7 @@ mockpca [--pki DIR] COMMAND [options]       (PKI directory: --pki, else $MOCKPCA
 |---|---|
 | `init --base-url URL --id FQDN` | Create the PKI directory and the PCA root (RSA 4096, 10 years). `--org`, `--country`, `--cn`, `--ou-serial`, `--days`. |
 | `ica --name N --parent CA --id FQDN --owner AGENCY_ID --org ORG --label LABEL` | Create an ICA (RSA 3072, ≤ 3 years). CN becomes `<LABEL> ICA Tier<n>`. `--pathlen` (Tier-2: 0–3, default 1; Tier-n: the issuer's minus one), `--st`, `--l`, `--country`, `--ou-serial`, `--days`. |
+| `ica --name N --renew OLD [--days D] [--ou-serial S]` | Re-key ICA `OLD` (CP 3.1.5): new key and a new `OU=ICA-<serial>`, so the subject DN stays unique. Quad ID, parent, O, C, ST, L, label (hence the CN) and pathLenConstraint are kept; options that differ from `OLD` are refused. The new ICA gets its own directory, CRL and published certificate; `OLD` stays until it is revoked or expires. |
 | `issue --ca CA --profile P --name N --id ID --roles R1,R2 --org ORG` | Generate a key and issue an End-Entity certificate. Profiles: `agency`, `agent`, `element`, `service`, `signing`. `--owner` (required except for agency), `--dns` and `--ip` (repeatable), `--ou`, `--st`, `--l`, `--country`, `--days` (default 90), `--key rsa:2048\|rsa:3072\|rsa:4096\|ec:P-256\|ec:P-384\|ec:P-521`, `--id-type` (signing only), `--renew NAME` (renewal or re-key of NAME: same subject DN and Quad ID). Only ICAs issue End-Entity certificates. |
 | `sign-csr … --csr FILE` | Like `issue`, for a key generated elsewhere (the CP has Subscribers generate their own keys). The CA sets subject and extensions; nothing is copied from the CSR. The CSR's key must meet the profile (CP 6.1.6, Table 7). |
 | `revoke --ee N \| --ca N [--reason R]` | Revoke an End-Entity certificate or an ICA and republish the issuer's CRL. Reasons: `unspecified`, `keyCompromise`, `CACompromise`, `affiliationChanged`, `superseded`, `cessationOfOperation` (no `certificateHold`: the CP does not support suspension, 4.9.13). |
@@ -96,8 +97,8 @@ By default the tool does not produce CP violations. It enforces:
 - Every certificate passes `mockpca-lint`. One that fails is revoked in its issuer's CRL and moved to `pki/rejected/`;
   nothing usable is left behind.
 - Only ICAs issue End-Entity certificates (CP 1.4.1). A revoked CA, or a CA below a revoked ICA, cannot issue.
-- Subject DNs and Quad IDs are unique in the PKI (CP 3.1.5, 7.1.2.11); `--renew` is the exception for renewal and
-  re-key.
+- Subject DNs and Quad IDs are unique in the PKI (CP 3.1.5, 7.1.2.11). Renewal and re-key are the exception:
+  `issue --renew` keeps subject DN and Quad ID, `ica --renew` keeps the Quad ID and gets a new OU serial number.
 - The Quad ID iD is also the subject CN, so it can be at most 64 characters (RFC 5280).
 - The iD is the first dNSName: always for Agency, Element and Service certificates, and for Agent and Signing
   certificates when they have dNSNames (CP Table 30). An agent iD of the form `user@fqdn` therefore cannot have any.

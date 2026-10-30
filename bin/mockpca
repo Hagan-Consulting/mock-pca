@@ -40,6 +40,9 @@ Commands:
               --name NAME --parent CA --id FQDN --owner AGENCY_ID --org ORG --label LABEL
               [--pathlen N] [--country CC] [--st ST] [--l L] [--ou-serial N] [--days N]
               CN becomes "<LABEL> ICA Tier<n>". Subject DN and Quad ID must be unique in the PKI.
+            ica --name NAME --renew OLD [--days N] [--ou-serial N]
+              Re-keys ICA OLD: new key and OU serial number; Quad ID, parent, O, C, ST, L, label and
+              pathLenConstraint are kept (options that differ from OLD are refused).
   issue     Generate a key pair and issue an End-Entity certificate.
               --ca CA --profile agency|agent|element|service|signing --name NAME --id ID --roles R1[,R2...]
               --org ORG [--owner AGENCY_ID] [--dns NAME]... [--ip ADDR]... [--ou OU] [--st ST] [--l L]
@@ -213,16 +216,19 @@ reject_issued() {
 	die "the certificate does not conform to the CP profile (see above); it was revoked and moved to $dest"
 }
 
-# check_unique SUBJECT QUAD: subject DNs and Quad IDs are unique in the PKI
-# (CP 3.1.5, 7.1.2.11). Certificates moved to rejected/ do not count.
+# check_unique SUBJECT QUAD COMMAND [RENEWAL]: subject DNs and Quad IDs are
+# unique in the PKI (CP 3.1.5, 7.1.2.11). Certificates moved to rejected/ do
+# not count. A renewal or re-key (RENEWAL non-empty) keeps the Quad ID of the
+# certificate it renews, so only the subject DN is checked: ICA re-keys get a
+# new OU serial number (3.1.5), End-Entity renewals skip the check entirely.
 check_unique() {
-	local subj="$1" quad="$2" conf
+	local subj="$1" quad="$2" cmd="$3" renewal="${4:-}" conf
 	for conf in "$PKI"/ca/*/ca.conf "$PKI"/ee/*/ee.conf; do
 		[[ -f $conf ]] || continue
 		[[ $(kv_get "$conf" subject || true) != "$subj" ]] ||
-			die "subject DN $subj is already used by $(dirname "$conf") (CP 3.1.5; use --renew for a renewal)"
-		[[ $(kv_get "$conf" quad || true) != "$quad" ]] ||
-			die "Quad ID $quad is already used by $(dirname "$conf") (CP 7.1.2.11; use --renew for a renewal)"
+			die "subject DN $subj is already used by $(dirname "$conf") (CP 3.1.5)"
+		[[ -n $renewal || $(kv_get "$conf" quad || true) != "$quad" ]] ||
+			die "Quad ID $quad is already used by $(dirname "$conf") (CP 7.1.2.11); for a renewal or re-key use '$cmd --renew NAME'"
 	done
 }
 
@@ -446,8 +452,11 @@ cmd_init() {
 
 cmd_ica() {
 	local name="" parent="" id="" owner="" org="" label="" pathlen="" country="" st="" l="" ou_serial="" days=1095
+	local renew="" given=()
 	while (($#)); do
 		case "$1" in
+		--parent | --id | --owner | --org | --label | --pathlen | --country | --st | --l) given+=("${1#--}") ;;&
+		--renew) renew="${2:?}"; shift 2 ;;
 		--name) name="${2:?}"; shift 2 ;;
 		--parent) parent="${2:?}"; shift 2 ;;
 		--id) id="${2:?}"; shift 2 ;;
@@ -464,6 +473,9 @@ cmd_ica() {
 		esac
 	done
 	require_pki
+	if [[ -n $renew ]]; then
+		ica_renewal_values
+	fi
 	for v in name parent id owner org label; do
 		[[ -n ${!v} ]] || die "ica: --$v is required"
 	done
@@ -497,13 +509,15 @@ cmd_ica() {
 			die "--pathlen: a Tier-$tier ICA takes its issuer's pathLenConstraint minus one ($((ppathlen - 1)), CP Table 23)"
 		pathlen=$((ppathlen - 1))
 	fi
+	local auto_serial=""
 	if [[ -z $ou_serial ]]; then
-		# Next serial number not used by an existing ICA's OU.
+		# Next serial number not used by an existing ICA's OU; the counter is
+		# only advanced once the ICA has been issued.
 		ou_serial="$(kv_get "$PKI/pki.conf" next_ica_serial)"
 		while cat "$PKI"/ca/*/ca.conf 2>/dev/null | grep -q "^subject=.*/OU=ICA-$ou_serial/"; do
 			ou_serial=$((ou_serial + 1))
 		done
-		kv_set "$PKI/pki.conf" next_ica_serial $((ou_serial + 1))
+		auto_serial=1
 	fi
 	check_int --ou-serial "$ou_serial"
 	local cn="$label ICA Tier$tier"
@@ -514,7 +528,7 @@ cmd_ica() {
 	[[ -z $l ]] || subj+="/L=$(subj_escape "$l")"
 	subj+="/CN=$(subj_escape "$cn")"
 	local quad="cAId/$id/ICA/$owner"
-	check_unique "$subj" "$quad"
+	check_unique "$subj" "$quad" ica "$renew"
 	resolve_lint
 
 	local d="$PKI/ca/$name" base
@@ -545,10 +559,38 @@ cmd_ica() {
 	kv_set "$d/ca.conf" id "$id"
 	kv_set "$d/ca.conf" subject "$subj"
 	kv_set "$d/ca.conf" quad "$quad"
+	# Kept by a re-key (ica --renew).
+	kv_set "$d/ca.conf" owner "$owner"
+	kv_set "$d/ca.conf" org "$org"
+	kv_set "$d/ca.conf" label "$label"
+	kv_set "$d/ca.conf" country "$country"
+	kv_set "$d/ca.conf" st "$st"
+	kv_set "$d/ca.conf" l "$l"
+	[[ -z $renew ]] || kv_set "$d/ca.conf" renews "$renew"
+	[[ -z $auto_serial ]] || kv_set "$PKI/pki.conf" next_ica_serial $((ou_serial + 1))
 	chain_of "$name" >"$d/chain.pem"
 	publish_ca_cert "$name"
 	gen_crl "$name"
-	note "ICA '$name' (Tier $tier, pathLenConstraint $pathlen) created: $d/ca.pem"
+	note "ICA '$name' (Tier $tier, pathLenConstraint $pathlen) created: $d/ca.pem${renew:+ (re-key of '$renew')}"
+}
+
+# ica_renewal_values: for ica --renew, take the Quad ID, parent and subject
+# values of the ICA being re-keyed (cmd_ica's variables) and refuse options
+# that differ from them (CP 3.1.5: a re-key keeps the names; the new OU serial
+# number keeps the subject DN unique).
+ica_renewal_values() {
+	local rd v old
+	check_name --renew "$renew"
+	rd="$(ca_dir "$renew")"
+	[[ $(kv_get "$rd/ca.conf" profile) == ica ]] || die "--renew: '$renew' is not an ICA"
+	kv_get "$rd/ca.conf" label >/dev/null || die "--renew: '$renew' was created by an older mockpca without re-key data"
+	for v in parent id owner org label country st l pathlen; do
+		old="$(kv_get "$rd/ca.conf" "$v" || true)"
+		if [[ " ${given[*]} " == *" $v "* && ${!v} != "$old" ]]; then
+			die "--$v: a re-key keeps the $v of ICA '$renew' (${old:-none})"
+		fi
+		printf -v "$v" '%s' "$old"
+	done
 }
 
 # issue and sign-csr share the option parsing and the signing step.
@@ -672,7 +714,7 @@ cmd_issue() {
 		[[ $(kv_get "$rconf" subject || true) == "$subj" && $(kv_get "$rconf" quad || true) == "$quad" ]] ||
 			die "--renew: a renewal or re-key keeps the subject DN and Quad ID of '$renew'"
 	else
-		check_unique "$subj" "$quad"
+		check_unique "$subj" "$quad" issue
 	fi
 	[[ $mode == issue ]] || check_csr_key "$profile" "$csr"
 

@@ -46,7 +46,8 @@ pki/
     ca.key ca.csr ca.pem       key (PKCS#8, 0600), request, certificate
     chain.pem                  this CA and its issuers up to, not including, the PCA (ICAs only)
     issue.cnf                  the exact OpenSSL configuration the certificate was issued with
-    ca.conf                    profile, parent, tier, pathlen, iD, subject, Quad ID (written once the lint passed)
+    ca.conf                    profile, parent, tier, pathlen, iD, subject, Quad ID, subject values kept by a re-key,
+                               re-keyed name (written once the lint passed)
     index.txt crlnumber newcerts/  openssl ca database
     crl.pem                    current CRL (PEM)
   ee/<name>/
@@ -85,8 +86,9 @@ a hosts file or container DNS) rather than a temporary address.
    - base URL: no commas, which separate AIA entries in OpenSSL syntax
    - CP rules that do not depend on OpenSSL: only ICAs issue End-Entity certificates (CP 1.4.1); the issuing CA and
      all its ancestors are not revoked; the subject DN and Quad ID are unique in the PKI (CP 3.1.5, 7.1.2.11),
-     except for `--renew NAME`, which must keep NAME's subject and Quad ID; for `sign-csr`, the CSR's key meets the
-     profile (CP 6.1.6, Table 7)
+     except for renewal and re-key: `issue --renew NAME` keeps NAME's subject DN and Quad ID, and `ica --renew NAME`
+     keeps NAME's Quad ID, parent, subject values and pathLenConstraint with a new key and a new OU serial number,
+     so its subject DN stays unique (3.1.5); for `sign-csr`, the CSR's key meets the profile (CP 6.1.6, Table 7)
    - build `mockpca-lint` before anything is signed
 2. Write `issue.cnf`:
    - URL and pathLenConstraint variables in its default section

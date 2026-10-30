@@ -97,6 +97,27 @@ EES+=(psap-renewed nioc console c2)
 [[ $(openssl x509 -in "$PKI/ee/sal/cert.pem" -noout -subject) == \
 	"subject=C = US, O = Mock County PSAP, CN = sal.county.mock.test" ]] || fail "End-Entity subject order"
 
+step "ICA re-key (ica --renew, CP 3.1.5)"
+"$M" ica --name region2 --renew region 2>/dev/null
+[[ $(grep '^quad=' "$PKI/ca/region2/ca.conf") == "$(grep '^quad=' "$PKI/ca/region/ca.conf")" ]] ||
+	fail "re-key changed the Quad ID"
+old_subj="$(openssl x509 -in "$PKI/ca/region/ca.pem" -noout -subject)"
+new_subj="$(openssl x509 -in "$PKI/ca/region2/ca.pem" -noout -subject)"
+[[ $old_subj != "$new_subj" && ${old_subj/OU = ICA-*, CN/} == "${new_subj/OU = ICA-*, CN/}" ]] ||
+	fail "re-key: subjects should differ in the OU serial only: $old_subj / $new_subj"
+[[ $(openssl x509 -in "$PKI/ca/region/ca.pem" -noout -pubkey) != $(openssl x509 -in "$PKI/ca/region2/ca.pem" -noout -pubkey) ]] ||
+	fail "re-key kept the key"
+"$M" issue --ca region2 --profile element --name rsal2 --id sal2.region.mock.test --roles SAL \
+	--owner psap.region.mock.test --org "Mock Region PSAP" 2>/dev/null
+EES+=(rsal2)
+expect_fail "re-key with another iD" "$M" ica --name region3 --renew region --id other.region.mock.test
+grep -q 'a re-key keeps the id' "$WORK/out" || fail "output: $(cat "$WORK/out")"
+expect_fail "re-key under another parent" "$M" ica --name region3 --renew region --parent state
+expect_fail "second ICA with the same Quad ID without --renew" "$M" ica --name region3 --parent pca \
+	--id ica.region.mock.test --owner psap.region.mock.test --org "Mock Region 911" --label "Mock Region Two"
+grep -q "use 'ica --renew NAME'" "$WORK/out" || fail "output: $(cat "$WORK/out")"
+[[ ! -e $PKI/ca/region3 ]] || fail "refused ICA left a directory"
+
 step "a failed lint leaves nothing valid behind"
 printf '#!/bin/sh\necho "fake lint: ERROR"\nexit 1\n' >"$WORK/fail-lint"
 chmod +x "$WORK/fail-lint"
@@ -125,13 +146,13 @@ grep -q 'WARNING: a CRL lifetime of 25 hours exceeds CP Table 3' "$WORK/out" || 
 ! grep -q WARNING "$WORK/out" || fail "warning for a 24-hour CRL"
 
 step "openssl verify (chain, CP policy, CRLs) and strict lint"
-for ca in pca state county region; do "$M" verify --ca "$ca" >/dev/null; done
+for ca in pca state county region region2; do "$M" verify --ca "$ca" >/dev/null; done
 for ee in "${EES[@]}"; do
 	"$M" verify --ee "$ee" >/dev/null || fail "verify $ee"
 	"$M" lint -strict -q -root "$PKI/trust/pca.pem" "$PKI/ee/$ee/fullchain.pem" || fail "lint $ee"
 done
 "$M" lint -strict -q -profile pca "$PKI/ca/pca/ca.pem"
-for ca in state county region; do
+for ca in state county region region2; do
 	"$M" lint -strict -q -profile ica -issuer "$PKI/ca/$(grep '^parent=' "$PKI/ca/$ca/ca.conf" | cut -d= -f2)/ca.pem" \
 		"$PKI/ca/$ca/ca.pem"
 done
