@@ -18,13 +18,12 @@ import (
 // <ca-name>.crl. Anything else (paths, dot files) is not served.
 var fileName = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}\.(cer|crl)$`)
 
-func newHandler(root *os.Root, log *slog.Logger) http.Handler {
+// newHandler serves www/ through root and passes /ocsp/ to the responder.
+func newHandler(root *os.Root, ocspResponder http.Handler, log *slog.Logger) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("GET /certs/{file}", serveFile(root, log, "certs", ".cer", "application/pkix-cert"))
 	mux.Handle("GET /crl/{file}", serveFile(root, log, "crl", ".crl", "application/pkix-crl"))
-	mux.HandleFunc("/ocsp/", func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "OCSP is not implemented yet by mockpca-serve", http.StatusNotImplemented)
-	})
+	mux.Handle("/ocsp/", ocspResponder)
 	return logRequests(mux, log)
 }
 

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -41,7 +42,10 @@ func newTestServer(t *testing.T) (*httptest.Server, string) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { root.Close() })
-	srv := httptest.NewServer(newHandler(root, slog.New(slog.DiscardHandler)))
+	// The OCSP responder (internal/ocsp, tested there) is replaced by a stub
+	// that shows the routing.
+	stub := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusTeapot) })
+	srv := httptest.NewServer(newHandler(root, stub, slog.New(slog.DiscardHandler)))
 	t.Cleanup(srv.Close)
 	return srv, www
 }
@@ -65,8 +69,8 @@ func TestHandler(t *testing.T) {
 		{"GET", "/crl/escape.crl", 404, "", ""},
 		{"GET", "/", 404, "", ""},
 		{"POST", "/crl/county.crl", 405, "", ""},
-		{"GET", "/ocsp/county", 501, "", ""},
-		{"POST", "/ocsp/county", 501, "", ""},
+		{"GET", "/ocsp/county/MAo%3D", http.StatusTeapot, "", ""},
+		{"POST", "/ocsp/county", http.StatusTeapot, "", ""},
 	}
 	for _, tc := range tests {
 		req, err := http.NewRequest(tc.method, srv.URL+tc.path, nil)
@@ -171,9 +175,16 @@ func TestRevalidation(t *testing.T) {
 func TestRunUsage(t *testing.T) {
 	t.Parallel()
 	if err := run(nil, io.Discard); err == nil {
-		t.Error("run without -root succeeded")
+		t.Error("run without -pki succeeded")
 	}
-	if err := run([]string{"-root", filepath.Join(t.TempDir(), "missing")}, io.Discard); err == nil {
-		t.Error("run with a missing root succeeded")
+	if err := run([]string{"-pki", filepath.Join(t.TempDir(), "missing")}, io.Discard); err == nil {
+		t.Error("run with a missing PKI succeeded")
+	}
+	pki := t.TempDir()
+	if err := os.Mkdir(filepath.Join(pki, "www"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := run([]string{"-pki", pki, "-nmin", "0"}, io.Discard); err == nil || !strings.Contains(err.Error(), "nmin") {
+		t.Errorf("run with -nmin 0: %v", err)
 	}
 }
