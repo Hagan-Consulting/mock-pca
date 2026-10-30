@@ -108,6 +108,66 @@ func TestHandler(t *testing.T) {
 	}
 }
 
+// TestRevalidation: a CRL republished within the same second as a client's
+// fetch must not be answered 304 (http.ServeContent compares
+// If-Modified-Since in whole seconds); revalidation uses the ETag.
+func TestRevalidation(t *testing.T) {
+	t.Parallel()
+	srv, www := newTestServer(t)
+	url := srv.URL + "/crl/county.crl"
+	get := func(hdr map[string]string) (*http.Response, string) {
+		t.Helper()
+		req, err := http.NewRequest("GET", url, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for k, v := range hdr {
+			req.Header.Set(k, v)
+		}
+		resp, err := srv.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		return resp, string(b)
+	}
+	first, _ := get(nil)
+	etag, lastMod := first.Header.Get("ETag"), first.Header.Get("Last-Modified")
+	if len(etag) != 66 || lastMod == "" {
+		t.Fatalf("ETag %q, Last-Modified %q", etag, lastMod)
+	}
+	if resp, _ := get(map[string]string{"If-None-Match": etag}); resp.StatusCode != http.StatusNotModified {
+		t.Errorf("If-None-Match with the current ETag: status %d, want 304", resp.StatusCode)
+	}
+
+	// Republish with the same modification time (same second).
+	path := filepath.Join(www, "crl", "county.crl")
+	st, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("republished"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, st.ModTime(), st.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	for _, hdr := range []map[string]string{
+		{"If-None-Match": etag},
+		{"If-Modified-Since": lastMod},
+		{"If-None-Match": etag, "If-Modified-Since": lastMod},
+	} {
+		resp, body := get(hdr)
+		if resp.StatusCode != http.StatusOK || body != "republished" {
+			t.Errorf("%v after republishing: status %d, body %q; want 200 with the new CRL", hdr, resp.StatusCode, body)
+		}
+		if resp.Header.Get("ETag") == etag {
+			t.Errorf("%v: ETag unchanged after republishing", hdr)
+		}
+	}
+}
+
 func TestRunUsage(t *testing.T) {
 	t.Parallel()
 	if err := run(nil, io.Discard); err == nil {

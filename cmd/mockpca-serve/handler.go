@@ -1,7 +1,11 @@
 package main
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"io"
 	"io/fs"
 	"log/slog"
 	"net/http"
@@ -46,10 +50,27 @@ func serveFile(root *os.Root, log *slog.Logger, dir, ext, contentType string) ht
 			http.NotFound(w, r)
 			return
 		}
-		w.Header().Set("Content-Type", contentType)
+		// The files are small (certificates, CRLs): read them whole and use a
+		// hash of the content as a strong ETag. Revalidation goes through
+		// If-None-Match only: http.ServeContent compares If-Modified-Since in
+		// whole seconds, so a CRL republished within the same second as a
+		// client's fetch would be answered 304 with the stale CRL. Passing a
+		// zero modification time disables that comparison; Last-Modified is
+		// still sent for information.
+		const maxSize = 10 << 20
+		body, err := io.ReadAll(io.LimitReader(f, maxSize+1))
+		if err != nil || len(body) > maxSize {
+			http.Error(w, "cannot read file", http.StatusInternalServerError)
+			return
+		}
+		sum := sha256.Sum256(body)
+		h := w.Header()
+		h.Set("Content-Type", contentType)
 		// Clients may cache, but must revalidate: CRLs change on revocation.
-		w.Header().Set("Cache-Control", "no-cache")
-		http.ServeContent(w, r, name, st.ModTime(), f)
+		h.Set("Cache-Control", "no-cache")
+		h.Set("ETag", `"`+hex.EncodeToString(sum[:])+`"`)
+		h.Set("Last-Modified", st.ModTime().UTC().Format(http.TimeFormat))
+		http.ServeContent(w, r, name, time.Time{}, bytes.NewReader(body))
 	})
 }
 
