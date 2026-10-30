@@ -307,6 +307,9 @@ func join(fs []Finding) string {
 	return b.String()
 }
 
+// noIssuer in a TestViolations case checks without an issuer certificate.
+var noIssuer = &x509.Certificate{}
+
 func TestViolations(t *testing.T) {
 	t.Parallel()
 	k, h := keys(), pki()
@@ -369,7 +372,7 @@ func TestViolations(t *testing.T) {
 		}, nil, Error, "no Quad ID otherName"},
 		{"agency owner is not its iD", Agency, nil, func(t *testing.T, c *x509.Certificate) {
 			replaceExt(c, quadSAN(t, "agencyId/psap.county.mock.test/urn:emergency:service:responder.psap/state.mock.test", "psap.county.mock.test"))
-		}, nil, Error, "SHALL be the certificate's own iD"},
+		}, nil, Error, "SHALL be the Agency's own iD"},
 		{"no policy", Element, nil, func(t *testing.T, c *x509.Certificate) {
 			c.Policies = nil
 		}, nil, Error, "certificatePolicies is missing"},
@@ -428,6 +431,42 @@ func TestViolations(t *testing.T) {
 			c.SubjectKeyId = []byte{1, 2, 3, 4}
 		}, nil, Error, "Method 1"},
 		{"signing with RSA", Signing, &k.ee.PublicKey, nil, nil, Error, "256-bit (or larger) ECC"},
+		{"EE issued by the PCA", Agency, nil, nil, h.pca, Error, "issued by ICAs, not by the PCA"},
+		{"agent FQDN iD with other first dNSName", Agent, nil, func(t *testing.T, c *x509.Certificate) {
+			c.Subject.CommonName = "jsmith.psap.county.mock.test"
+			replaceExt(c, quadSAN(t, "agentId/jsmith.psap.county.mock.test/CallTaking/psap.county.mock.test", "other.county.mock.test"))
+		}, nil, Error, "first dNSName"},
+		{"agent user@ iD with a dNSName", Agent, nil, func(t *testing.T, c *x509.Certificate) {
+			replaceExt(c, quadSAN(t, "agentId/jsmith@psap.county.mock.test/CallTaking/psap.county.mock.test", "psap.county.mock.test"))
+		}, nil, Error, "first dNSName"},
+		{"subject attribute order", Agency, nil, func(t *testing.T, c *x509.Certificate) {
+			c.RawSubject = rawName(t, str(oidCountry, asn1.TagPrintableString, "US"), str(oidCN, asn1.TagPrintableString, "psap.county.mock.test"), str(oidOrg, asn1.TagPrintableString, "Mock County PSAP"))
+		}, nil, Warn, "not in the CP order C, O, L, ST, OU, CN"},
+		{"ICA attribute order neither table", ICA, nil, func(t *testing.T, c *x509.Certificate) {
+			c.RawSubject = rawName(t, str(oidCountry, asn1.TagPrintableString, "US"), str(oidOrgUnit, asn1.TagPrintableString, "ICA-3"), str(oidOrg, asn1.TagPrintableString, "Mock 911"), str(oidCN, asn1.TagPrintableString, "Mock ICA Tier3"))
+		}, nil, Warn, "not in the CP order"},
+		{"ICA CN with the wrong tier", ICA, nil, func(t *testing.T, c *x509.Certificate) {
+			c.Subject.CommonName = "Mock ICA Tier7"
+		}, nil, Error, "names Tier 7, but the ICA is Tier 3"},
+		{"ICA OU PCA-", ICA, nil, func(t *testing.T, c *x509.Certificate) {
+			c.Subject.OrganizationalUnit = []string{"PCA-1"}
+		}, nil, Error, "SHALL be <CA type> CA-<serial number>"},
+		{"ICA OU without serial", ICA, nil, func(t *testing.T, c *x509.Certificate) {
+			c.Subject.OrganizationalUnit = []string{"ICA"}
+		}, nil, Error, "SHALL be <CA type> CA-<serial number>"},
+		{"PCA OU without serial number", PCA, nil, func(t *testing.T, c *x509.Certificate) {
+			c.Subject.OrganizationalUnit = []string{"PCA-x"}
+		}, nil, Error, "PCA-<serial number>"},
+		{"ICA pathlen 5 without issuer", ICA, nil, func(t *testing.T, c *x509.Certificate) {
+			c.MaxPathLen = 5
+		}, noIssuer, Error, "SHALL be 0–3"},
+		{"basicConstraints in an End-Entity", Agent, nil, func(t *testing.T, c *x509.Certificate) {
+			c.BasicConstraintsValid = true
+		}, nil, Warn, "extension basicConstraints is not in the CP profile"},
+		{"anyExtendedKeyUsage", Element, nil, func(t *testing.T, c *x509.Certificate) {
+			replaceExt(c, ekuExt(t, true, oidServerAuth, oidClientAuth, asn1.ObjectIdentifier{2, 5, 29, 37, 0}))
+		}, nil, Error, "anyExtendedKeyUsage is not consistent"},
+		{"RSA exponent 3", Agency, &rsa.PublicKey{N: k.ee.N, E: 3}, nil, nil, Error, "public exponent 3"},
 		{"EE asserts cA", Agent, nil, func(t *testing.T, c *x509.Certificate) {
 			c.BasicConstraintsValid, c.IsCA = true, true
 		}, nil, Error, "asserts cA"},
@@ -437,10 +476,13 @@ func TestViolations(t *testing.T) {
 			t.Parallel()
 			c := build(t, tc.profile, tc.key, tc.mutate)
 			iss := c.issuer
-			if tc.issuer != nil {
+			switch {
+			case tc.issuer == noIssuer:
+				iss = nil
+			case tc.issuer != nil:
 				iss = tc.issuer
 			}
-			fs := Check(c.cert, tc.profile, Options{Issuer: iss})
+			fs := Check(c.cert, tc.profile, Options{Issuer: iss, Root: h.pca})
 			for _, f := range fs {
 				if f.Severity == tc.sev && strings.Contains(f.Msg, tc.want) {
 					return
@@ -536,5 +578,42 @@ func TestParseProfile(t *testing.T) {
 	}
 	if _, err := ParseProfile("root"); err == nil {
 		t.Error("ParseProfile(root) succeeded")
+	}
+}
+
+func TestAgencyOwnedByPCA(t *testing.T) {
+	t.Parallel()
+	h := pki()
+	c := build(t, Agency, nil, func(t *testing.T, c *x509.Certificate) {
+		replaceExt(c, quadSAN(t, "agencyId/psap.county.mock.test/urn:emergency:service:responder.psap/pca.mock.test", "psap.county.mock.test"))
+	})
+	if fs := Check(c.cert, Agency, Options{Issuer: c.issuer, Root: h.pca}); len(fs) > 0 {
+		t.Errorf("NIOC Agency Certificate with the PCA's iD as owner:\n%s", join(fs))
+	}
+	fs := Check(c.cert, Agency, Options{Issuer: c.issuer})
+	if len(fs) != 1 || fs[0].Severity != Warn || !strings.Contains(fs[0].Msg, "only a NIOC Agency Certificate") {
+		t.Errorf("without the PCA certificate, want one warning; got:\n%s", join(fs))
+	}
+}
+
+func TestICATierForms(t *testing.T) {
+	t.Parallel()
+	for _, cn := range []string{"Mock ICA Tier3", "Mock ICA Tier 3", "Mock ICA Tier-3"} {
+		c := build(t, ICA, nil, func(t *testing.T, c *x509.Certificate) { c.Subject.CommonName = cn })
+		if fs := Check(c.cert, ICA, Options{Issuer: c.issuer}); len(fs) > 0 {
+			t.Errorf("CN %q:\n%s", cn, join(fs))
+		}
+	}
+}
+
+func TestDetectSigningByEKU(t *testing.T) {
+	t.Parallel()
+	for _, idType := range []string{"agencyId", "agentId", "elementId", "serviceId"} {
+		c := build(t, Signing, nil, func(t *testing.T, c *x509.Certificate) {
+			replaceExt(c, quadSAN(t, idType+"/log.county.mock.test/LoggingService/psap.county.mock.test"))
+		})
+		if p, err := Detect(c.cert); err != nil || p != Signing {
+			t.Errorf("%s: Detect = %q, %v; want signing", idType, p, err)
+		}
 	}
 }

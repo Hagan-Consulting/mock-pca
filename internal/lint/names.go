@@ -7,6 +7,7 @@ import (
 	"crypto/rsa"
 	"encoding/asn1"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -72,13 +73,10 @@ func (k *checker) subjectAltName() {
 			return
 		}
 	}
+	// Also for Agents: an agentId of the form user@fqdn cannot be a
+	// dNSName, so such a certificate cannot carry dNSNames at all.
 	if len(san.dns) > 0 && san.dns[0] != k.quad.ID {
-		if k.p == Agent {
-			// An agentId (user@domain) cannot be a dNSName.
-			k.warnf("7.1.2.11 Table 30", "first dNSName %q is not the iD %q", san.dns[0], k.quad.ID)
-		} else {
-			k.errorf("7.1.2.11 Table 30", "first dNSName %q is not the iD %q", san.dns[0], k.quad.ID)
-		}
+		k.errorf("7.1.2.11 Table 30", "first dNSName %q is not the iD %q", san.dns[0], k.quad.ID)
 	}
 }
 
@@ -123,13 +121,32 @@ func (k *checker) checkQuad(s string) {
 		k.warnf("7.1.2.11 Table 28", "Quad ID has no owner")
 	case !ValidFQDN(q.Owner):
 		k.errorf("7.1.2.11 Table 28", "Quad ID owner %q is not an FQDN", q.Owner)
-	case (k.p == PCA || k.p == Agency) && q.Owner != q.ID:
+	case k.p == PCA && q.Owner != q.ID:
 		k.errorf("7.1.2.11 Table 28", "Quad ID owner %q SHALL be the certificate's own iD %q", q.Owner, q.ID)
+	case k.p == Agency && q.Owner != q.ID:
+		k.agencyOwner(q)
+	}
+}
+
+// agencyOwner checks an Agency Certificate whose owner is not its own iD:
+// Table 28 allows the PCA's iD for a NIOC Agency Certificate.
+func (k *checker) agencyOwner(q *Quad) {
+	const ref = "7.1.2.11 Table 28"
+	if k.root == nil {
+		k.warnf(ref, "Quad ID owner %q is not the Agency's own iD %q; only a NIOC Agency Certificate has the PCA's iD as owner (give the PCA certificate to check)", q.Owner, q.ID)
+		return
+	}
+	rq, err := quadOf(k.root)
+	if err != nil || q.Owner != rq.ID {
+		k.errorf(ref, "Quad ID owner %q SHALL be the Agency's own iD %q, or the PCA's iD for a NIOC Agency Certificate", q.Owner, q.ID)
 	}
 }
 
 var (
-	icaCN     = regexp.MustCompile(`ICA Tier\s*[0-9]+$`)
+	// "Tier2" (Table 2), "Tier 2" and "Tier-2" (3.1.2).
+	icaCN     = regexp.MustCompile(`ICA Tier[- ]?([0-9]+)$`)
+	pcaOU     = regexp.MustCompile(`^PCA-[0-9]+$`)
+	icaOU     = regexp.MustCompile(`^[A-Za-z]+ ?CA-[0-9]+$`)
 	countryRE = regexp.MustCompile(`^[A-Z]{2}$`)
 	// Upper bounds from RFC 5280 Appendix A.
 	attrMax = map[string]int{
@@ -156,6 +173,7 @@ func (k *checker) subjectName() {
 		return
 	}
 	got := map[string]string{}
+	var order []string
 	multi := false
 	for _, a := range attrs {
 		id := a.oid.String()
@@ -168,6 +186,7 @@ func (k *checker) subjectName() {
 			k.warnf(ref, "subject attribute %s appears more than once", name)
 		}
 		got[name] = a.value
+		order = append(order, name)
 		multi = multi || a.multi
 		k.stringType(name, a)
 		if max := attrMax[id]; max > 0 && len([]rune(a.value)) > max {
@@ -177,6 +196,7 @@ func (k *checker) subjectName() {
 	if multi {
 		k.warnf("3.1.1", "subject has a multi-valued RDN")
 	}
+	k.attributeOrder(order)
 	need := func(name string) bool {
 		if _, ok := got[name]; !ok {
 			k.errorf(ref, "subject %s is missing", name)
@@ -188,7 +208,7 @@ func (k *checker) subjectName() {
 	case PCA:
 		need("O")
 		need("CN")
-		if need("OU") && !strings.HasPrefix(got["OU"], "PCA-") {
+		if need("OU") && !pcaOU.MatchString(got["OU"]) {
 			k.errorf(ref, "subject OU %q SHALL be PCA-<serial number>", got["OU"])
 		}
 	case ICA:
@@ -196,11 +216,11 @@ func (k *checker) subjectName() {
 			k.warnf("3.1.1 Table 2", "subject C is missing (Table 2 lists it for ICA subjects; Table 35 marks it optional)")
 		}
 		need("O")
-		if need("OU") && !strings.Contains(got["OU"], "CA-") {
-			k.errorf(ref, "subject OU %q SHALL be <CA type> CA-<serial number>, e.g. ICA-1", got["OU"])
+		if ou := got["OU"]; need("OU") && (!icaOU.MatchString(ou) || pcaOU.MatchString(ou)) {
+			k.errorf(ref, "subject OU %q SHALL be <CA type> CA-<serial number>, e.g. ICA-1", ou)
 		}
-		if need("CN") && !icaCN.MatchString(got["CN"]) {
-			k.errorf(ref, "subject CN %q SHALL be <Name> ICA Tier<#>", got["CN"])
+		if need("CN") {
+			k.icaTier(ref, got["CN"])
 		}
 	default:
 		need("C")
@@ -209,6 +229,73 @@ func (k *checker) subjectName() {
 			k.errorf(ref, "subject CN %q SHALL equal the Quad ID iD %q", got["CN"], k.quad.ID)
 		}
 	}
+}
+
+// icaTier checks that an ICA CN names its tier, and when the issuer is known
+// that the number is the issuer's tier plus one (the PCA is Tier 1).
+func (k *checker) icaTier(ref, cn string) {
+	m := icaCN.FindStringSubmatch(cn)
+	if m == nil {
+		k.errorf(ref, "subject CN %q SHALL be <Name> ICA Tier<#>", cn)
+		return
+	}
+	if k.iss == nil {
+		return
+	}
+	want := 2
+	if !selfSigned(k.iss) {
+		im := icaCN.FindStringSubmatch(k.iss.Subject.CommonName)
+		if im == nil {
+			return
+		}
+		n, _ := strconv.Atoi(im[1])
+		want = n + 1
+	}
+	if got, _ := strconv.Atoi(m[1]); got != want {
+		k.errorf(ref, "subject CN %q names Tier %d, but the ICA is Tier %d", cn, got, want)
+	}
+}
+
+// Subject attribute order of the CP tables. ICAs: Table 2 lists c, o, ou,
+// st, l, cn and Table 35 C, O, OU, L, ST, CN; both are accepted.
+var attrOrders = map[Profile][][]string{
+	PCA: {{"C", "O", "OU", "CN"}},
+	ICA: {{"C", "O", "OU", "ST", "L", "CN"}, {"C", "O", "OU", "L", "ST", "CN"}},
+}
+
+var eeOrder = [][]string{{"C", "O", "L", "ST", "OU", "CN"}}
+
+// attributeOrder warns when the subject attributes are not in the order of
+// the CP tables (Tables 2, 34–36).
+func (k *checker) attributeOrder(got []string) {
+	orders, ok := attrOrders[k.p]
+	if !ok {
+		orders = eeOrder
+	}
+	for _, want := range orders {
+		if inOrder(got, want) {
+			return
+		}
+	}
+	k.warnf("3.1.1 Table 2", "subject attributes %s are not in the CP order %s",
+		strings.Join(got, ", "), strings.Join(orders[0], ", "))
+}
+
+// inOrder reports whether the attributes in got appear in the relative order
+// of want.
+func inOrder(got, want []string) bool {
+	pos := map[string]int{}
+	for i, w := range want {
+		pos[w] = i
+	}
+	last := -1
+	for _, g := range got {
+		if pos[g] < last {
+			return false
+		}
+		last = pos[g]
+	}
+	return true
 }
 
 // stringType checks §3.1.1: PrintableString, or UTF8String when the value
@@ -243,6 +330,10 @@ func (k *checker) publicKey() {
 			k.errorf(ref, "Signing Certificates SHALL use a 256-bit (or larger) ECC key, not RSA")
 		} else if bits := pub.N.BitLen(); bits < minRSA[k.p] {
 			k.errorf(ref, "RSA key is %d bits, %s Certificates need at least %d", bits, k.p, minRSA[k.p])
+		}
+		// FIPS 186-4 B.3.1 (CP 6.1.6): odd e with 2^16 < e < 2^256.
+		if e := pub.E; e <= 1<<16 || e%2 == 0 {
+			k.errorf("6.1.6", "RSA public exponent %d is not allowed (FIPS 186-4: odd, greater than 65536)", e)
 		}
 	case *ecdsa.PublicKey:
 		if k.p != Signing {

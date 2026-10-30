@@ -96,8 +96,13 @@ type Options struct {
 	// Issuer is the issuing CA certificate. When set, the signature, the
 	// issuer name, the authorityKeyIdentifier, validity nesting and the ICA
 	// pathLenConstraint are checked against it. Ignored for the PCA, which
-	// is checked as self-signed.
+	// is checked as self-signed. An End-Entity certificate issued by a
+	// self-signed certificate (the PCA) is reported (CP 1.4.1).
 	Issuer *x509.Certificate
+	// Root is the PCA certificate. When set, an Agency Certificate whose
+	// Quad ID owner is the PCA's iD (a NIOC Agency Certificate, Table 28) is
+	// accepted; without it such an owner is only a warning.
+	Root *x509.Certificate
 }
 
 // HasErrors reports whether any finding is an Error.
@@ -114,6 +119,7 @@ type checker struct {
 	c    *x509.Certificate
 	p    Profile
 	iss  *x509.Certificate
+	root *x509.Certificate
 	quad *Quad
 	out  []Finding
 }
@@ -128,7 +134,7 @@ func (k *checker) warnf(ref, format string, args ...any) {
 
 // Check returns the findings for c checked against profile p.
 func Check(c *x509.Certificate, p Profile, o Options) []Finding {
-	k := &checker{c: c, p: p, iss: o.Issuer}
+	k := &checker{c: c, p: p, iss: o.Issuer, root: o.Root}
 	if p == PCA {
 		k.iss = c
 	}
@@ -147,12 +153,20 @@ func Check(c *x509.Certificate, p Profile, o Options) []Finding {
 	return k.out
 }
 
-// Detect guesses the profile of c from its Quad ID, basicConstraints and
-// extKeyUsage.
+// Detect guesses the profile of c from its Quad ID and extKeyUsage: a
+// non-CA certificate with id-kp-codeSigning is a Signing Certificate,
+// whatever its idType.
 func Detect(c *x509.Certificate) (Profile, error) {
 	q, err := quadOf(c)
 	if err != nil {
 		return "", err
+	}
+	if q.IDType != "cAId" {
+		for _, u := range c.ExtKeyUsage {
+			if u == x509.ExtKeyUsageCodeSigning {
+				return Signing, nil
+			}
+		}
 	}
 	switch q.IDType {
 	case "cAId":
@@ -170,11 +184,6 @@ func Detect(c *x509.Certificate) (Profile, error) {
 	case "serviceId":
 		return Service, nil
 	case "elementId":
-		for _, u := range c.ExtKeyUsage {
-			if u == x509.ExtKeyUsageCodeSigning {
-				return Signing, nil
-			}
-		}
 		return Element, nil
 	}
 	return "", fmt.Errorf("unknown Quad ID idType %q", q.IDType)
@@ -266,6 +275,7 @@ func (k *checker) rules() map[string]extRule {
 		set(oidKU, required, true, "7.1.2.3 Table 16")
 		set(oidSAN, required, false, "7.1.2.3 Table 16")
 		set(oidSKI, required, false, "7.1.2.3 Table 16")
+		set(oidBC, unexpected, false, "7.1.2.3 Table 16")
 		switch k.p {
 		case Agency, Agent:
 			set(oidEKU, forbidden, true, "7.1.2.9")
@@ -390,6 +400,11 @@ func (k *checker) extKeyUsage() {
 		delete(got, w)
 	}
 	for u := range got {
+		if u == x509.ExtKeyUsageAny {
+			// CP 6.1.7: extKeyUsage SHALL be consistent with keyUsage.
+			k.errorf("6.1.7", "extKeyUsage anyExtendedKeyUsage is not consistent with the profile's keyUsage")
+			continue
+		}
 		k.warnf(ref, "extKeyUsage %s is not in the CP profile", ekuName(u))
 	}
 	for _, u := range k.c.UnknownExtKeyUsage {
@@ -438,13 +453,13 @@ func (k *checker) basicConstraints() {
 		k.errorf("7.1.2.6 Table 22", "pathLenConstraint is not set")
 		return
 	}
-	if k.iss == nil || !k.iss.BasicConstraintsValid {
+	// Tier-2 ICAs take 0–3 and every lower tier its issuer's minus one, so no
+	// ICA can exceed 3 whatever its issuer.
+	if c.MaxPathLen > 3 {
+		k.errorf("7.1.2.6 Tables 22/23", "ICA pathLenConstraint is %d, SHALL be 0–3", c.MaxPathLen)
 		return
 	}
-	if selfSigned(k.iss) {
-		if c.MaxPathLen > 3 {
-			k.errorf("7.1.2.6 Table 22", "Tier-2 ICA pathLenConstraint is %d, SHALL be 0–3", c.MaxPathLen)
-		}
+	if k.iss == nil || !k.iss.BasicConstraintsValid || selfSigned(k.iss) {
 		return
 	}
 	switch want := k.iss.MaxPathLen - 1; {
@@ -575,5 +590,8 @@ func (k *checker) issuer() {
 	}
 	if err := k.c.CheckSignatureFrom(k.iss); err != nil {
 		k.errorf("7.1.3", "signature does not verify with the issuer certificate: %v", err)
+	}
+	if !k.p.isCA() && selfSigned(k.iss) {
+		k.errorf("1.4.1", "End-Entity Certificates are issued by ICAs, not by the PCA")
 	}
 }

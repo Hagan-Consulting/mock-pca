@@ -4,7 +4,7 @@
 // Usage:
 //
 //	mockpca-lint [-profile auto|pca|ica|agency|agent|element|service|signing]
-//	             [-issuer FILE] [-strict] [-q] FILE...
+//	             [-issuer FILE] [-root FILE] [-strict] [-q] FILE...
 //
 // Each FILE holds a certificate (PEM or DER). When a PEM file holds more than
 // one certificate (a full chain), the second one is the issuer unless
@@ -31,6 +31,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	profile := fs.String("profile", "auto", "certificate profile, or auto to detect it from the Quad ID")
 	issuerFile := fs.String("issuer", "", "issuing CA certificate (enables signature, AKI, name and validity nesting checks)")
+	rootFile := fs.String("root", "", "PCA certificate (accepts NIOC Agency Certificates owned by the PCA's iD)")
 	strict := fs.Bool("strict", false, "treat warnings as failures")
 	quiet := fs.Bool("q", false, "print findings only, no OK lines")
 	fs.Usage = func() {
@@ -61,6 +62,15 @@ func run(args []string, stdout, stderr io.Writer) int {
 		}
 		issuer = certs[0]
 	}
+	var root *x509.Certificate
+	if *rootFile != "" {
+		certs, err := readCerts(*rootFile)
+		if err != nil {
+			fmt.Fprintln(stderr, "mockpca-lint:", err)
+			return 2
+		}
+		root = certs[0]
+	}
 	status := 0
 	for _, name := range fs.Args() {
 		certs, err := readCerts(name)
@@ -80,7 +90,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 				continue
 			}
 		}
-		findings := lint.Check(certs[0], prof, lint.Options{Issuer: iss})
+		findings := lint.Check(certs[0], prof, lint.Options{Issuer: iss, Root: root})
 		for _, f := range findings {
 			fmt.Fprintf(stdout, "%s: %s: %s\n", name, prof, f)
 			if f.Severity == lint.Error || *strict {
