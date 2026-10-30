@@ -18,9 +18,12 @@ default_md        = sha256
 default_crl_hours = 24
 policy            = mockpca_policy
 copy_extensions   = none
-# End-Entity subject DNs repeat during rollover (CP 3.1.1).
+# End-Entity subject DNs repeat during rollover (CP 3.1.1); bin/mockpca
+# enforces uniqueness itself and allows repeats only for --renew.
 unique_subject    = no
-preserve          = yes
+# Subject attribute order: bin/mockpca passes -preserveDN, which keeps the
+# order of -subj (the CP table order). OpenSSL 3.0 ignores "preserve = yes"
+# here and would reorder the DN by the policy section.
 email_in_dn       = no
 # CP 3.1.1: PrintableString, or UTF8String when the value cannot be encoded
 # as PrintableString (B_ASN1_PRINTABLESTRING | B_ASN1_UTF8STRING).

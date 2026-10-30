@@ -14,9 +14,6 @@ OPENSSL="${OPENSSL:-openssl}"
 PKI="${MOCKPCA_PKI:-$PWD/pki}"
 POLICY_OID="1.3.6.1.4.1.55670.1"
 QUAD_OID="1.3.6.1.4.1.55670.1.1"
-# Git Bash: keep -subj values ("/C=...", "/O=...") from being rewritten as
-# Windows paths. No effect elsewhere.
-export MSYS2_ARG_CONV_EXCL="/C=;/O="
 # Ignore any system-wide OpenSSL configuration.
 export OPENSSL_CONF=/dev/null
 
@@ -42,15 +39,18 @@ Commands:
   ica       Create an ICA under the PCA or another ICA.
               --name NAME --parent CA --id FQDN --owner AGENCY_ID --org ORG --label LABEL
               [--pathlen N] [--country CC] [--st ST] [--l L] [--ou-serial N] [--days N]
-              CN becomes "<LABEL> ICA Tier<n>".
+              CN becomes "<LABEL> ICA Tier<n>". Subject DN and Quad ID must be unique in the PKI.
   issue     Generate a key pair and issue an End-Entity certificate.
               --ca CA --profile agency|agent|element|service|signing --name NAME --id ID --roles R1[,R2...]
               --org ORG [--owner AGENCY_ID] [--dns NAME]... [--ip ADDR]... [--ou OU] [--st ST] [--l L]
-              [--country CC] [--days N] [--key rsa:BITS|ec:CURVE] [--id-type TYPE]
+              [--country CC] [--days N] [--key rsa:BITS|ec:CURVE] [--id-type TYPE] [--renew NAME]
+              Subject DN and Quad ID must be unique in the PKI; --renew NAME re-keys or renews
+              certificate NAME (same subject DN and Quad ID).
   sign-csr  Like issue, for an externally generated key: --csr FILE instead of --key.
   revoke    Revoke a certificate and republish its issuer's CRL.
               --ee NAME | --ca NAME   [--reason REASON]
   crl       Regenerate and publish CRLs.   --ca NAME | --all   [--hours N | --seconds N]
+              Lifetimes over 24 hours are allowed for testing but exceed CP Table 3 (warning).
   verify    Verify a certificate with OpenSSL (chain, CP policy OID, CRLs).   --ee NAME | --ca NAME  [--no-crl]
   list      List CAs and End-Entity certificates with their status.
   lint      Run mockpca-lint on certificate files.   [mockpca-lint flags] FILE...
@@ -154,12 +154,20 @@ ca_dir() {
 	printf '%s' "$d"
 }
 
-# require_active_ca NAME: refuse to issue from a revoked CA.
+# require_active_ca NAME: refuse to issue from a CA that is revoked or has a
+# revoked ancestor.
 require_active_ca() {
-	local d parent
-	d="$(ca_dir "$1")"
-	parent="$(kv_get "$d/ca.conf" parent || true)"
-	[[ -z $parent || $(status_of "$d/ca.pem" "$parent") != R ]] || die "CA '$1' is revoked"
+	local name="$1" d parent
+	while :; do
+		d="$(ca_dir "$name")"
+		parent="$(kv_get "$d/ca.conf" parent || true)"
+		[[ -n $parent ]] || return 0
+		if [[ $(status_of "$d/ca.pem" "$parent") == R ]]; then
+			[[ $name == "$1" ]] && die "CA '$1' is revoked"
+			die "CA '$1' cannot issue: its issuer '$name' is revoked"
+		fi
+		name="$parent"
+	done
 }
 
 ee_dir() {
@@ -177,14 +185,66 @@ go_tool() {
 	printf '%s' "$exe"
 }
 
+# resolve_lint builds mockpca-lint before anything is signed, so a build
+# failure cannot leave an unchecked certificate behind.
+LINT=""
+resolve_lint() { [[ -n $LINT ]] || LINT="${MOCKPCA_LINT:-$(go_tool mockpca-lint)}"; }
+
 run_lint() {
-	local profile="$1" cert="$2" issuer="${3:-}" lint
-	lint="${MOCKPCA_LINT:-$(go_tool mockpca-lint)}"
-	if [[ -n $issuer ]]; then
-		"$lint" -q -profile "$profile" -issuer "$issuer" "$cert"
-	else
-		"$lint" -q -profile "$profile" "$cert"
+	local profile="$1" cert="$2" issuer="${3:-}" args
+	args=(-q -profile "$profile")
+	resolve_lint
+	[[ -z $issuer ]] || args+=(-issuer "$issuer")
+	[[ ! -f $PKI/trust/pca.pem ]] || args+=(-root "$PKI/trust/pca.pem")
+	"$LINT" "${args[@]}" "$cert"
+}
+
+# reject_issued CERT ISSUER DIR: after a failed lint, revoke the certificate
+# in its issuer's database, republish the issuer's CRL and move DIR to
+# $PKI/rejected/, so that nothing usable or valid is left behind.
+reject_issued() {
+	local cert="$1" issuer="$2" dir="$3" dest
+	(cd "$(ca_dir "$issuer")" && "$OPENSSL" ca -config "$CA_CNF" -revoke "$cert" -crl_reason superseded 2>/dev/null) ||
+		note "could not revoke the rejected certificate $cert"
+	gen_crl "$issuer"
+	dest="$PKI/rejected/$(basename "$dir")-$(serial_of "$cert")"
+	mkdir -p "$PKI/rejected"
+	mv "$dir" "$dest"
+	die "the certificate does not conform to the CP profile (see above); it was revoked and moved to $dest"
+}
+
+# check_unique SUBJECT QUAD: subject DNs and Quad IDs are unique in the PKI
+# (CP 3.1.5, 7.1.2.11). Certificates moved to rejected/ do not count.
+check_unique() {
+	local subj="$1" quad="$2" conf
+	for conf in "$PKI"/ca/*/ca.conf "$PKI"/ee/*/ee.conf; do
+		[[ -f $conf ]] || continue
+		[[ $(kv_get "$conf" subject || true) != "$subj" ]] ||
+			die "subject DN $subj is already used by $(dirname "$conf") (CP 3.1.5; use --renew for a renewal)"
+		[[ $(kv_get "$conf" quad || true) != "$quad" ]] ||
+			die "Quad ID $quad is already used by $(dirname "$conf") (CP 7.1.2.11; use --renew for a renewal)"
+	done
+}
+
+# check_csr_key PROFILE CSR: CP 6.1.6, the RA only uses CSRs whose key meets
+# the key size of the requested certificate (Table 7) and FIPS 186-4.
+check_csr_key() {
+	local profile="$1" csr="$2" info bits e
+	info="$("$OPENSSL" req -in "$csr" -noout -pubkey | "$OPENSSL" pkey -pubin -noout -text)" ||
+		die "--csr: cannot read the public key"
+	if [[ $profile == signing ]]; then
+		[[ $info == *"ED25519 Public-Key"* || $info =~ NIST\ CURVE:\ P-(256|384|521) ]] ||
+			die "--csr: a Signing Certificate needs an ECC P-256/P-384/P-521 or Ed25519 key (CP Table 7)"
+		return
 	fi
+	[[ $info =~ Public-Key:\ \(([0-9]+)\ bit\) && $info == *Modulus:* ]] ||
+		die "--csr: $profile certificates need an RSA key (CP Table 7)"
+	bits="${BASH_REMATCH[1]}"
+	((bits >= 2048)) || die "--csr: RSA key of $bits bits, at least 2048 required (CP Table 7)"
+	[[ $info =~ Exponent:\ ([0-9]+)\  ]] || die "--csr: unsupported RSA public exponent"
+	e="${BASH_REMATCH[1]}"
+	((${#e} <= 18 && e > 65536 && e % 2 == 1)) ||
+		die "--csr: RSA public exponent $e is not allowed (FIPS 186-4: odd, greater than 65536)"
 }
 
 # Escape a value for an `openssl -subj` argument.
@@ -344,7 +404,13 @@ cmd_init() {
 	check_int --ou-serial "$ou_serial"
 	check_int --days "$days"
 	((days <= 3652)) || die "--days: the PCA certificate is valid for at most 10 years (CP Table 12)"
-	[[ ! -e $PKI/pki.conf ]] || die "a PKI already exists at $PKI"
+	if [[ -e $PKI ]]; then
+		[[ -d $PKI && -z $(ls -A "$PKI") ]] || die "$PKI exists and is not an empty directory"
+		CLEANUP+=("$PKI/pki.conf" "$PKI/ca" "$PKI/ee" "$PKI/trust" "$PKI/www")
+	else
+		CLEANUP+=("$PKI")
+	fi
+	resolve_lint
 
 	mkdir -p "$PKI"/{ca,ee,trust,www/certs,www/crl}
 	kv_set "$PKI/pki.conf" base_url "$base_url"
@@ -360,17 +426,21 @@ cmd_init() {
 	genkey rsa:4096 "$d/ca.key"
 	write_issue_cnf "$d/issue.cnf" pca "cAId/$id/PCA/$id" "" ""
 	"$OPENSSL" req -new -config "$d/issue.cnf" -key "$d/ca.key" -out "$d/ca.csr"
-	(cd "$d" && "$OPENSSL" ca -batch -config "$CA_CNF" -selfsign -keyfile ca.key -in ca.csr -out ca.pem \
-		-extfile issue.cnf -extensions mockpca_ext -days "$days" -notext \
-		-subj "/C=$country/O=$(subj_escape "$org")/OU=PCA-$ou_serial/CN=$(subj_escape "$cn")" 2>/dev/null) ||
+	local subj="/C=$country/O=$(subj_escape "$org")/OU=PCA-$ou_serial/CN=$(subj_escape "$cn")"
+	(cd "$d" && "$OPENSSL" ca -batch -config "$CA_CNF" -preserveDN -selfsign -keyfile ca.key -in ca.csr -out ca.pem \
+		-extfile issue.cnf -extensions mockpca_ext -days "$days" -notext -subj "$subj" 2>/dev/null) ||
 		die "issuing the PCA certificate failed"
+	# A failing PCA certificate removes the whole new PKI (cleanup on exit).
+	run_lint pca "$d/ca.pem" || die "the PCA certificate does not conform to the CP profile (see above)"
 	kv_set "$d/ca.conf" profile pca
 	kv_set "$d/ca.conf" tier 1
 	kv_set "$d/ca.conf" id "$id"
-	run_lint pca "$d/ca.pem" || die "the PCA certificate does not conform to the CP profile (see above)"
+	kv_set "$d/ca.conf" subject "$subj"
+	kv_set "$d/ca.conf" quad "cAId/$id/PCA/$id"
 	cp "$d/ca.pem" "$PKI/trust/pca.pem"
 	publish_ca_cert "$name"
 	gen_crl "$name"
+	CLEANUP=()
 	note "PCA created: $d/ca.pem (trust anchor: $PKI/trust/pca.pem)"
 }
 
@@ -428,40 +498,53 @@ cmd_ica() {
 		pathlen=$((ppathlen - 1))
 	fi
 	if [[ -z $ou_serial ]]; then
+		# Next serial number not used by an existing ICA's OU.
 		ou_serial="$(kv_get "$PKI/pki.conf" next_ica_serial)"
+		while cat "$PKI"/ca/*/ca.conf 2>/dev/null | grep -q "^subject=.*/OU=ICA-$ou_serial/"; do
+			ou_serial=$((ou_serial + 1))
+		done
 		kv_set "$PKI/pki.conf" next_ica_serial $((ou_serial + 1))
 	fi
 	check_int --ou-serial "$ou_serial"
 	local cn="$label ICA Tier$tier"
 	check_dn "CN ($cn)" "$cn"
+	# Subject attribute order of CP Table 2: c, o, ou, [st], [l], cn.
+	local subj="/C=$country/O=$(subj_escape "$org")/OU=ICA-$ou_serial"
+	[[ -z $st ]] || subj+="/ST=$(subj_escape "$st")"
+	[[ -z $l ]] || subj+="/L=$(subj_escape "$l")"
+	subj+="/CN=$(subj_escape "$cn")"
+	local quad="cAId/$id/ICA/$owner"
+	check_unique "$subj" "$quad"
+	resolve_lint
 
-	local d="$PKI/ca/$name" base subj
+	local d="$PKI/ca/$name" base
 	base="$(base_url)"
+	CLEANUP+=("$d")
 	mkdir -p "$d/newcerts"
 	: >"$d/index.txt"
 	echo 01 >"$d/crlnumber"
 	note "generating the key of ICA '$name' (RSA 3072)"
 	genkey rsa:3072 "$d/ca.key"
-	write_issue_cnf "$d/issue.cnf" ica "cAId/$id/ICA/$owner" "" "" \
+	write_issue_cnf "$d/issue.cnf" ica "$quad" "" "" \
 		"MOCKPCA_OCSP_URL = $base/ocsp/$parent" \
 		"MOCKPCA_CRL_URL = $base/crl/$parent.crl" \
 		"MOCKPCA_PATHLEN = $pathlen"
 	"$OPENSSL" req -new -config "$d/issue.cnf" -key "$d/ca.key" -out "$d/ca.csr"
-	subj="/C=$country"
-	[[ -z $st ]] || subj+="/ST=$(subj_escape "$st")"
-	[[ -z $l ]] || subj+="/L=$(subj_escape "$l")"
-	subj+="/O=$(subj_escape "$org")/OU=ICA-$ou_serial/CN=$(subj_escape "$cn")"
 	local validity
 	mapfile -t validity < <(validity_args "$pd/ca.pem" "$days")
-	(cd "$pd" && "$OPENSSL" ca -batch -config "$CA_CNF" -in "$d/ca.csr" -out "$d/ca.pem" \
+	(cd "$pd" && "$OPENSSL" ca -batch -config "$CA_CNF" -preserveDN -in "$d/ca.csr" -out "$d/ca.pem" \
 		-extfile "$d/issue.cnf" -extensions mockpca_ext "${validity[@]}" -notext -subj "$subj" 2>/dev/null) ||
 		die "issuing the ICA certificate failed"
+	CLEANUP=()
+	# The CA state (ca.conf) is only written once the certificate passed.
+	run_lint ica "$d/ca.pem" "$pd/ca.pem" || reject_issued "$d/ca.pem" "$parent" "$d"
 	kv_set "$d/ca.conf" profile ica
 	kv_set "$d/ca.conf" parent "$parent"
 	kv_set "$d/ca.conf" tier "$tier"
 	kv_set "$d/ca.conf" pathlen "$pathlen"
 	kv_set "$d/ca.conf" id "$id"
-	run_lint ica "$d/ca.pem" "$pd/ca.pem" || die "the ICA certificate does not conform to the CP profile (see above)"
+	kv_set "$d/ca.conf" subject "$subj"
+	kv_set "$d/ca.conf" quad "$quad"
 	chain_of "$name" >"$d/chain.pem"
 	publish_ca_cert "$name"
 	gen_crl "$name"
@@ -473,7 +556,7 @@ cmd_issue() {
 	local mode="$1"
 	shift
 	local ca="" profile="" name="" id="" roles="" owner="" org="" ou="" st="" l="" country="" days=90
-	local key_spec="" csr="" id_type="" dns=() ips=()
+	local key_spec="" csr="" id_type="" renew="" dns=() ips=()
 	while (($#)); do
 		case "$1" in
 		--ca) ca="${2:?}"; shift 2 ;;
@@ -491,6 +574,7 @@ cmd_issue() {
 		--dns) dns+=("${2:?}"); shift 2 ;;
 		--ip) ips+=("${2:?}"); shift 2 ;;
 		--id-type) id_type="${2:?}"; shift 2 ;;
+		--renew) renew="${2:?}"; shift 2 ;;
 		--key)
 			[[ $mode == issue ]] || die "sign-csr: --key is not used (the key is in the CSR)"
 			key_spec="${2:?}"; shift 2 ;;
@@ -507,7 +591,10 @@ cmd_issue() {
 	[[ $mode == issue || -n $csr ]] || die "sign-csr: --csr is required"
 	check_name --ca "$ca"
 	check_name --name "$name"
+	[[ -z $renew ]] || check_name --renew "$renew"
 	[[ ! -e $PKI/ee/$name ]] || die "an End-Entity certificate named '$name' already exists"
+	[[ $(kv_get "$(ca_dir "$ca")/ca.conf" profile) != pca ]] ||
+		die "the PCA issues ICA certificates only; End-Entity certificates come from an ICA (CP 1.4.1)"
 
 	local default_type
 	case "$profile" in
@@ -532,8 +619,12 @@ cmd_issue() {
 	((${#id} <= 64)) || die "--id: the iD is also the subject CN, which holds at most 64 characters (RFC 5280)"
 	valid_roles "$roles" || die "--roles: comma-separated, no spaces; letters, digits, ':', '.', '_', '-'"
 	if [[ $profile == agency ]]; then
-		[[ -z $owner || $owner == "$id" ]] || die "--owner: an Agency Certificate's owner is its own iD (CP Table 28)"
-		owner="$id"
+		# Table 28: the Agency's own iD; a NIOC Agency Certificate has the PCA's iD.
+		local pca_id
+		pca_id="$(kv_get "$(ca_dir pca)/ca.conf" id)"
+		[[ -z $owner || $owner == "$id" || $owner == "$pca_id" ]] ||
+			die "--owner: an Agency Certificate's owner is its own iD, or the PCA's iD ($pca_id) for a NIOC Agency Certificate (CP Table 28)"
+		owner="${owner:-$id}"
 	fi
 	[[ -n $owner ]] || die "$mode: --owner (iD of the controlling Agency) is required"
 	valid_fqdn "$owner" || die "--owner: '$owner' is not a lower-case FQDN"
@@ -547,11 +638,18 @@ cmd_issue() {
 	((days <= 1095)) || die "--days: at most 3 years (CP Table 12)"
 
 	# The first dNSName is the iD (CP Table 30); Agency, Element and Service
-	# Certificates must have one.
+	# Certificates must have one, for Agent and Signing Certificates they are
+	# optional, but if present the iD still comes first.
 	local all_dns=() x
 	case "$profile" in
 	agency | element | service) all_dns=("$id") ;;
-	signing) [[ ${#dns[@]} -eq 0 ]] || all_dns=("$id") ;;
+	agent | signing)
+		if ((${#dns[@]})); then
+			valid_fqdn "$id" ||
+				die "--dns: the first DNS name must be the iD (CP Table 30), and '$id' is not a DNS name"
+			all_dns=("$id")
+		fi
+		;;
 	esac
 	for x in "${dns[@]}"; do
 		[[ $x =~ $DNS_RE && ${#x} -le 253 ]] || die "--dns: '$x' is not a lower-case DNS name (no wildcards)"
@@ -561,14 +659,32 @@ cmd_issue() {
 		[[ $x =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ || $x =~ ^[0-9A-Fa-f:]+$ ]] || die "--ip: '$x' is not an IP address"
 	done
 
+	# Subject attribute order of CP Tables 2 and 36: c, o, [l], [st], [ou], cn.
+	local subj="/C=$country/O=$(subj_escape "$org")"
+	[[ -z $l ]] || subj+="/L=$(subj_escape "$l")"
+	[[ -z $st ]] || subj+="/ST=$(subj_escape "$st")"
+	[[ -z $ou ]] || subj+="/OU=$(subj_escape "$ou")"
+	subj+="/CN=$(subj_escape "$id")"
+	local quad="$id_type/$id/$roles/$owner"
+	if [[ -n $renew ]]; then
+		local rconf
+		rconf="$(ee_dir "$renew")/ee.conf"
+		[[ $(kv_get "$rconf" subject || true) == "$subj" && $(kv_get "$rconf" quad || true) == "$quad" ]] ||
+			die "--renew: a renewal or re-key keeps the subject DN and Quad ID of '$renew'"
+	else
+		check_unique "$subj" "$quad"
+	fi
+	[[ $mode == issue ]] || check_csr_key "$profile" "$csr"
+
 	local cadir d base
 	cadir="$(ca_dir "$ca")"
 	require_active_ca "$ca"
+	resolve_lint
 	d="$PKI/ee/$name"
 	base="$(base_url)"
 	mkdir -p "$d"
 	CLEANUP+=("$d")
-	write_issue_cnf "$d/issue.cnf" "$profile" "$id_type/$id/$roles/$owner" "${all_dns[*]:-}" "${ips[*]:-}" \
+	write_issue_cnf "$d/issue.cnf" "$profile" "$quad" "${all_dns[*]:-}" "${ips[*]:-}" \
 		"MOCKPCA_CA_CERT_URL = $base/certs/$ca.cer" \
 		"MOCKPCA_OCSP_URL = $base/ocsp/$ca" \
 		"MOCKPCA_CRL_URL = $base/crl/$ca.crl"
@@ -583,25 +699,19 @@ cmd_issue() {
 		"$OPENSSL" req -in "$csr" -noout -verify 2>/dev/null || die "--csr: '$csr' is not a CSR with a valid signature"
 		"$OPENSSL" req -in "$csr" -out "$d/csr.pem"
 	fi
-	local subj="/C=$country"
-	[[ -z $st ]] || subj+="/ST=$(subj_escape "$st")"
-	[[ -z $l ]] || subj+="/L=$(subj_escape "$l")"
-	subj+="/O=$(subj_escape "$org")"
-	[[ -z $ou ]] || subj+="/OU=$(subj_escape "$ou")"
-	subj+="/CN=$(subj_escape "$id")"
 	local validity
 	mapfile -t validity < <(validity_args "$cadir/ca.pem" "$days")
-	(cd "$cadir" && "$OPENSSL" ca -batch -config "$CA_CNF" -in "$d/csr.pem" -out "$d/cert.pem" \
+	(cd "$cadir" && "$OPENSSL" ca -batch -config "$CA_CNF" -preserveDN -in "$d/csr.pem" -out "$d/cert.pem" \
 		-extfile "$d/issue.cnf" -extensions mockpca_ext "${validity[@]}" -notext -subj "$subj" 2>/dev/null) ||
 		die "issuing the certificate failed (is the CA's key valid and the CSR's key large enough?)"
 	CLEANUP=()
+	run_lint "$profile" "$d/cert.pem" "$cadir/ca.pem" || reject_issued "$d/cert.pem" "$ca" "$d"
 	kv_set "$d/ee.conf" profile "$profile"
 	kv_set "$d/ee.conf" ca "$ca"
 	kv_set "$d/ee.conf" id "$id"
-	if ! run_lint "$profile" "$d/cert.pem" "$cadir/ca.pem"; then
-		mv "$d/cert.pem" "$d/cert.pem.lint-failed"
-		die "the certificate does not conform to the CP profile (see above); kept as $d/cert.pem.lint-failed"
-	fi
+	kv_set "$d/ee.conf" subject "$subj"
+	kv_set "$d/ee.conf" quad "$quad"
+	[[ -z $renew ]] || kv_set "$d/ee.conf" renews "$renew"
 	chain_of "$ca" >"$d/chain.pem"
 	cat "$d/cert.pem" "$d/chain.pem" >"$d/fullchain.pem"
 	note "issued $profile certificate '$name': $d/cert.pem (chain: fullchain.pem, key: ${key_spec:+key.pem}${csr:+external})"
@@ -619,8 +729,9 @@ cmd_revoke() {
 	done
 	require_pki
 	[[ (-n $ee && -z $ca) || (-z $ee && -n $ca) ]] || die "revoke: give exactly one of --ee or --ca"
-	[[ $reason =~ ^(unspecified|keyCompromise|CACompromise|affiliationChanged|superseded|cessationOfOperation|certificateHold)$ ]] ||
-		die "--reason: unspecified, keyCompromise, CACompromise, affiliationChanged, superseded, cessationOfOperation or certificateHold"
+	# No certificateHold: suspension is not supported by the CP (4.9.13).
+	[[ $reason =~ ^(unspecified|keyCompromise|CACompromise|affiliationChanged|superseded|cessationOfOperation)$ ]] ||
+		die "--reason: unspecified, keyCompromise, CACompromise, affiliationChanged, superseded or cessationOfOperation"
 	local cert issuer
 	if [[ -n $ee ]]; then
 		check_name --ee "$ee"
@@ -645,8 +756,14 @@ cmd_crl() {
 		case "$1" in
 		--ca) ca="${2:?}"; shift 2 ;;
 		--all) all=1; shift ;;
-		--hours) check_int --hours "${2:?}"; period=(-crlhours "$2"); shift 2 ;;
-		--seconds) check_int --seconds "${2:?}"; period=(-crlsec "$2"); shift 2 ;;
+		--hours)
+			check_int --hours "${2:?}"
+			((10#$2 <= 24)) || note "WARNING: a CRL lifetime of $2 hours exceeds CP Table 3 (a new CRL at least every 24 hours); allowed for testing"
+			period=(-crlhours "$2"); shift 2 ;;
+		--seconds)
+			check_int --seconds "${2:?}"
+			((10#$2 <= 86400)) || note "WARNING: a CRL lifetime of $2 seconds exceeds CP Table 3 (a new CRL at least every 24 hours); allowed for testing"
+			period=(-crlsec "$2"); shift 2 ;;
 		*) die "crl: unknown option $1" ;;
 		esac
 	done
@@ -738,6 +855,8 @@ cmd_serve() {
 		esac
 	done
 	((hours > 0)) || die "--crl-hours must be at least 1"
+	((hours <= 48)) ||
+		note "WARNING: republishing CRLs every $((hours / 2)) hours exceeds CP Table 3 (a new CRL at least every 24 hours); allowed for testing"
 	kv_set "$PKI/pki.conf" crl_hours "$hours"
 	local serve pid sleeper=""
 	serve="$(go_tool mockpca-serve)"
