@@ -69,7 +69,9 @@ Commands:
   ocsp-fault    Fault injection for a CA's OCSP responder (read by mockpca-serve on every request).
               --ca NAME  --clear | --show | [--http-status N] [--delay-ms N]
               [--status unauthorized|malformedRequest|tryLater|internalError] [--sha1-only] [--stale]
-              [--wrong-signer] [--unknown]      (each call replaces the CA's faults)
+              [--wrong-signer | --no-nocheck] [--unknown]      (each call replaces the CA's faults)
+              --no-nocheck signs with a NEGATIVE FIXTURE: a responder certificate issued by the CA
+              without id-pkix-ocsp-nocheck (made on demand in ca/NAME/ocsp/negative-no-nocheck/).
   ocsp-response Write a fresh DER OCSP response for a certificate (stapling tests).
               --ee NAME [--out FILE] [--nmin N]   (default ee/NAME/ocsp.der, nextUpdate 60 minutes)
   serve     Serve CA certificates, CRLs and OCSP over HTTP; refresh CRLs and responder certificates.
@@ -683,7 +685,7 @@ cmd_ocsp_signer() {
 }
 
 cmd_ocsp_fault() {
-	local ca="" clear=0 show=0 lines=() rogue=0
+	local ca="" clear=0 show=0 lines=() rogue=0 nonocheck=0
 	while (($#)); do
 		case "$1" in
 		--ca) ca="${2:?}"; shift 2 ;;
@@ -703,6 +705,7 @@ cmd_ocsp_fault() {
 		--sha1-only) lines+=("sha1_only=1"); shift ;;
 		--stale) lines+=("stale=1"); shift ;;
 		--wrong-signer) lines+=("wrong_signer=1"); rogue=1; shift ;;
+		--no-nocheck) lines+=("no_nocheck=1"); nonocheck=1; shift ;;
 		--unknown) lines+=("unknown=1"); shift ;;
 		*) die "ocsp-fault: unknown option $1" ;;
 		esac
@@ -724,8 +727,12 @@ cmd_ocsp_fault() {
 		return
 	fi
 	[[ ${#lines[@]} -gt 0 ]] || die "ocsp-fault: give faults, --clear or --show"
+	((rogue + nonocheck < 2)) || die "ocsp-fault: --wrong-signer and --no-nocheck each choose the signer; give one"
 	if ((rogue)); then
 		make_rogue_signer "$d/ocsp"
+	fi
+	if ((nonocheck)); then
+		make_no_nocheck_signer "$ca"
 	fi
 	printf '%s\n' "${lines[@]}" >"$f.tmp"
 	mv "$f.tmp" "$f"
@@ -751,6 +758,55 @@ make_rogue_signer() {
 	"$OPENSSL" req -x509 -new -key "$od/rogue-key.pem" -config "$od/rogue.cnf" -extensions rogue_ext -days 30 \
 		-subj "/O=MOCK ROGUE OCSP SIGNER - NOT TRUSTED/CN=rogue.ocsp.mock.test" -out "$od/rogue-cert.pem" ||
 		die "creating the rogue OCSP signer failed"
+}
+
+# make_no_nocheck_signer CA: the NEGATIVE TEST FIXTURE of the no-nocheck
+# fault: an OCSP responder certificate issued by the CA itself but without
+# id-pkix-ocsp-nocheck (profiles/negative-ocsp-responder-no-nocheck.ext), in
+# ca/<CA>/ocsp/negative-no-nocheck/. Made only on demand (and again when it
+# expires within a day), kept apart from the CA's real responder and outside
+# the uniqueness check, and it must still be reported by mockpca-lint
+# (CLAUDE.md): if the lint passes it, or reports anything but the missing
+# nocheck, the fixture is wrong and the command fails.
+make_no_nocheck_signer() {
+	local name="$1" d nd id owner org country rid subj quad validity out
+	d="$(ca_dir "$name")"
+	nd="$d/ocsp/negative-no-nocheck"
+	if [[ -f $nd/cert.pem ]] && "$OPENSSL" x509 -in "$nd/cert.pem" -noout -checkend 86400 >/dev/null; then
+		return 0
+	fi
+	require_active_ca "$name"
+	id="$(kv_get "$d/ca.conf" id)"
+	owner="$(kv_get "$d/ca.conf" owner || printf '%s' "$id")"
+	org="$(kv_get "$d/ca.conf" org)" || die "CA '$name' was created by an older mockpca (no org in ca.conf)"
+	country="$(kv_get "$d/ca.conf" country || kv_get "$PKI/pki.conf" country)"
+	rid="negative-no-nocheck.ocsp.$id"
+	((${#rid} <= 64)) || die "fixture iD $rid is longer than 64 characters"
+	subj="/C=$country/O=$(subj_escape "$org")/CN=$rid"
+	quad="elementId/$rid/OCSPResponder/$owner"
+	resolve_lint
+	rm -rf "$nd"
+	mkdir -p "$nd"
+	CLEANUP+=("$nd")
+	genkey rsa:2048 "$nd/key.pem"
+	write_issue_cnf "$nd/issue.cnf" negative-ocsp-responder-no-nocheck "$quad" "" ""
+	"$OPENSSL" req -new -config "$nd/issue.cnf" -key "$nd/key.pem" -out "$nd/csr.pem"
+	mapfile -t validity < <(validity_args "$d/ca.pem" 30)
+	(cd "$d" && "$OPENSSL" ca -batch -config "$CA_CNF" -preserveDN -in "$nd/csr.pem" -out "$nd/cert.pem" \
+		-extfile "$nd/issue.cnf" -extensions mockpca_ext "${validity[@]}" -notext -subj "$subj" 2>/dev/null) ||
+		die "issuing the no-nocheck fixture of '$name' failed"
+	cleanup_drop "$nd"
+	# A fixture with any other lint result is wrong: like any certificate
+	# that fails its check, it is revoked and moved to rejected/.
+	if out="$("$LINT" -q -profile ocsp-responder -issuer "$d/ca.pem" -root "$PKI/trust/pca.pem" "$nd/cert.pem")"; then
+		note "negative fixture $nd/cert.pem passed mockpca-lint, but must lack id-pkix-ocsp-nocheck"
+		reject_issued "$nd/cert.pem" "$name" "$nd"
+	fi
+	if [[ $out != *"id-pkix-ocsp-nocheck is missing"* || $(grep -c ERROR <<<"$out") != 1 ]]; then
+		note "negative fixture $nd/cert.pem: unexpected lint findings: $out"
+		reject_issued "$nd/cert.pem" "$name" "$nd"
+	fi
+	note "NEGATIVE FIXTURE (mockpca-lint reports it, as expected): $nd/cert.pem: ${out#*: }"
 }
 
 cmd_ocsp_response() {
@@ -1140,14 +1196,21 @@ cmd_serve() {
 	pid=$!
 	trap 'kill "$pid" $sleeper 2>/dev/null; wait "$pid" 2>/dev/null; exit 0' INT TERM
 	note "serving $PKI/www and OCSP on $listen; CRLs are republished every $((hours * 30)) minutes (half their lifetime)"
+	# Responder certificates (30 days, renewed within 7 days of expiry) are
+	# checked at least daily, whatever the CRL interval.
+	local crl_every=$((hours * 1800)) wake last_crl=$SECONDS
+	wake=$((crl_every < 86400 ? crl_every : 86400))
 	while kill -0 "$pid" 2>/dev/null; do
-		sleep $((hours * 1800)) </dev/null >/dev/null 2>&1 &
+		sleep "$wake" </dev/null >/dev/null 2>&1 &
 		sleeper=$!
 		wait "$sleeper" || true
 		sleeper=""
 		kill -0 "$pid" 2>/dev/null || break
 		refresh_responders
-		cmd_crl --all
+		if ((SECONDS - last_crl >= crl_every)); then
+			cmd_crl --all
+			last_crl=$SECONDS
+		fi
 	done
 	wait "$pid"
 }

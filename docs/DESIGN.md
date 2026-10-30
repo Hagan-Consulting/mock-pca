@@ -140,9 +140,15 @@ mandatory and cannot be skipped. (`preserve = yes` above is a second example: ac
 Every CA answers OCSP at `<base>/ocsp/<ca>` (the URL in its certificates' AIA): an ICA for the End-Entity
 certificates it issued, the PCA for the ICAs. `mockpca-serve` is only the front end:
 
-1. **Decoding** (`internal/ocsp`): POST bodies (`application/ocsp-request`) and GET paths (RFC 6960 A.1: URL-encoded
-   base64, padding optional) up to 64 KiB. The DER is parsed as an OCSPRequest with `encoding/asn1` (at most 32
-   CertIDs) before OpenSSL sees it. The built-in `openssl ocsp -port` server was not used: in the feasibility study
+1. **Decoding** (`internal/ocsp`): POST bodies (`application/ocsp-request`) and GET paths (RFC 6960 A.1) up to
+   64 KiB. GET is strict (product owner policy: the tool is a test target, so clients that do not follow the RFCs
+   fail visibly instead of being worked around). RFC 9919 section 6 requires base64 per RFC 4648 section 4,
+   nothing outside its alphabet, URL-encoded per RFC 3986, where `/` separates path segments and must be sent as
+   `%2F`; RFC 4648 section 3.2 requires padding. An unescaped `/`, a missing padding, whitespace or non-zero padding
+   bits are `malformedRequest`, with the reason logged; unescaped `+` and `=` are valid path characters and accepted.
+   `/ocsp/` requests reach the responder before the ServeMux, whose path cleaning would otherwise redirect a request
+   with `//` instead of answering it. The DER is parsed as an OCSPRequest with `encoding/asn1` (at most 32 CertIDs)
+   before OpenSSL sees it. The built-in `openssl ocsp -port` server was not used: in the feasibility study
    one malformed request terminated it, it answered from a stale index, and its own man page calls it a test tool.
 2. **Signing**: one `openssl ocsp -index ca/<ca>/index.txt -CA ca/<ca>/ca.pem -rsigner … -rkey … -rmd sha256 -nmin N
    -reqin … -respout …` run per request, so the database is read fresh and revocations show at once. SHA-1 and
@@ -151,17 +157,26 @@ certificates it issued, the PCA for the ICAs. `mockpca-serve` is only the front 
 3. **Limits**: at most 4 OpenSSL processes at once; waiting for a slot plus the run is bounded by 10 seconds
    (`tryLater` when no slot frees up, `internalError` when OpenSSL fails). Malformed requests get `malformedRequest`,
    requests for a CA the PKI does not have `unauthorized`. The server never crashes on input.
-4. **Caching**: every signed response has thisUpdate and nextUpdate (`-nmin`, default 60 minutes) and RFC 5019 6.2 (RFC 9919 7.2)
-   headers: `Cache-Control: max-age=<nextUpdate − now>, public, no-transform, must-revalidate`, `Expires`,
-   `Last-Modified`. Error and fault responses are sent with `Cache-Control: no-cache`.
+4. **Caching**: every signed response has thisUpdate and nextUpdate (`-nmin`, default 60 minutes). Its HTTP headers
+   follow RFC 9919 sections 6 and 7.2 (RFC 5019 5, 6.2) and are taken from the signed response itself: Last-Modified
+   is its thisUpdate, Expires its nextUpdate, `Cache-Control: max-age=<n>, public, no-transform, must-revalidate`
+   with n ending at least a second before nextUpdate (0 once it has passed, as for a replayed stale response), and
+   the ETag the hex SHA-256 of the response. Signed responses, faults included, never carry `no-cache` (RFC 9919
+   7.2 forbids it for authoritative responses); unsigned error responses are sent with `Cache-Control: no-cache`. A
+   signed response whose times cannot be read is not sent (`internalError`).
 5. **Faults** (`ocsp-fault`): read from `ca/<ca>/ocsp-fault.conf` on every request, set only by the command, never
    by request input. HTTP status, delay (≤ 25 s), fixed unsigned error statuses, SHA-1 only (`unauthorized` for any
    other CertID hash, for RFC 9919 fallback clients), stale (the first response, valid for one minute, is replayed
-   unchanged; the server keeps up to 1024 in memory), wrong signer (a self-signed rogue certificate outside the PKI)
-   and unknown (OpenSSL answers from an empty database, so the response is properly signed).
+   unchanged; the server keeps up to 1024 in memory), wrong signer (a self-signed rogue certificate outside the PKI),
+   no nocheck (a negative fixture: a responder certificate issued by the CA itself but without
+   `id-pkix-ocsp-nocheck`, from `profiles/negative-ocsp-responder-no-nocheck.ext`, made only on demand in
+   `ca/<ca>/ocsp/negative-no-nocheck/` and reported by `mockpca-lint`, or the command fails; it tests whether clients
+   reject such responses or check the responder's revocation status, RFC 6960 4.2.2.2.1) and unknown (OpenSSL
+   answers from an empty database, so the response is properly signed).
 6. **Responder certificates** (`profiles/ocsp-responder.ext`, CP-NOTES N21): issued with every CA (RSA 2048, 30 days,
    capped at the CA's notAfter), checked by `mockpca-lint -profile ocsp-responder`; `ocsp-signer --rotate` replaces one
-   and revokes the old one; `mockpca serve` renews those that expire within 7 days.
+   and revokes the old one; `mockpca serve` checks at least daily, independent of the CRL interval, and renews those
+   that expire within 7 days.
 7. **Stapling**: `ocsp-response --ee NAME` writes a fresh response signed the same way, for servers that load
    staples from files.
 

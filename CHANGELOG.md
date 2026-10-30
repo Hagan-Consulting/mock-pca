@@ -21,9 +21,12 @@ All notable changes to this project are documented in this file. The format is b
 - `mockpca-serve`: HTTP publication of CA certificates and CRLs at the URLs in the certificates, revalidated by a
   content ETag.
 - OCSP responders for every mock CA (#1): `mockpca-serve -pki` answers GET and POST at `/ocsp/<ca>` (SHA-1 and
-  SHA-256 CertIDs, responses signed by OpenSSL per request, RFC 5019 caching headers); delegated responder
-  certificates issued with every CA (`ocsp-responder` profile, also in `mockpca-lint`) or CA-signed responses
-  (`mockpca ocsp-signer`); fault injection per CA (`mockpca ocsp-fault`); stapling files (`mockpca ocsp-response`).
+  SHA-256 CertIDs, responses signed by OpenSSL per request; strict GET decoding per RFC 9919 6; caching headers per
+  RFC 9919 6 and 7.2 taken from the signed response, with a SHA-256 ETag); delegated responder certificates issued
+  with every CA (`ocsp-responder` profile, also in `mockpca-lint`) or CA-signed responses (`mockpca ocsp-signer`);
+  fault injection per CA (`mockpca ocsp-fault`, including a responder certificate without `id-pkix-ocsp-nocheck` as a
+  negative fixture); stapling files (`mockpca ocsp-response`); `mockpca serve` checks responder certificates at least
+  daily.
 - `examples/demo.sh` sample hierarchy, `scripts/e2e.sh` OpenSSL end-to-end test, design, profile and CP notes docs.
 - Repository scaffold: Go module (standard library only), checks, CI and Dependabot configuration. Supported
   platforms: Linux and macOS; Windows through WSL (Git Bash is not supported).

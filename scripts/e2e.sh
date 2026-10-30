@@ -32,6 +32,19 @@ expect_fail() {
 	fi
 }
 
+# hdr NAME: value of a response header in $WORK/hdr (case-insensitive).
+hdr() {
+	tr -d '\r' <"$WORK/hdr" | awk -v k="$(tr '[:upper:]' '[:lower:]' <<<"$1")" \
+		'{ i = index($0, ":"); if (i && tolower(substr($0, 1, i - 1)) == k) { print substr($0, i + 2); exit } }'
+}
+# to_epoch DATE: seconds since the epoch of an HTTP date or an OpenSSL
+# "Mon DD HH:MM:SS YYYY GMT" date (GNU date, else BSD date).
+to_epoch() {
+	date -u -d "$1" +%s 2>/dev/null ||
+		date -u -j -f '%a, %d %b %Y %H:%M:%S GMT' "$1" +%s 2>/dev/null ||
+		date -u -j -f '%b %e %H:%M:%S %Y GMT' "$1" +%s
+}
+
 step "sample hierarchy"
 BASE_URL="http://127.0.0.1:$PORT" examples/demo.sh >/dev/null 2>"$WORK/demo.log" || {
 	cat "$WORK/demo.log" >&2
@@ -233,12 +246,27 @@ for hash in sha256 sha1; do
 	expect_status "$rpsap" good
 done
 grep -q 'Next Update' "$WORK/ocsp.out" || fail "OCSP response without nextUpdate"
-# GET (RFC 6960 A.1): URL-encoded base64 in the path.
+# GET (RFC 6960 A.1, RFC 9919 6): base64 in the path, '/' escaped as %2F;
+# '+' and '=' are valid unescaped in a path.
 openssl ocsp -issuer "$PKI/ca/region/ca.pem" -sha256 -cert "$rpsap" -no_nonce -reqout "$WORK/req.der" >/dev/null
-get_url="$OCSP/region/$(base64 <"$WORK/req.der" | tr -d '\n' | sed 's|+|%2B|g; s|/|%2F|g; s|=|%3D|g')"
-curl -fsS -D "$WORK/hdr" -o "$WORK/resp.der" "$get_url" || fail "OCSP GET"
+b64="$(base64 <"$WORK/req.der" | tr -d '\n')"
+t0="$(date -u +%s)"
+curl -fsS -D "$WORK/hdr" -o "$WORK/resp.der" "$OCSP/region/${b64//\//%2F}" || fail "OCSP GET"
 grep -qi '^content-type: application/ocsp-response' "$WORK/hdr" || fail "OCSP GET: content type"
-grep -qi '^cache-control: max-age=3600, public, no-transform, must-revalidate' "$WORK/hdr" || fail "OCSP GET: caching headers"
+# Caching headers (RFC 9919 6, 7.2): Last-Modified = thisUpdate, Expires =
+# nextUpdate, max-age ending before nextUpdate, ETag = hex SHA-256.
+openssl ocsp -respin "$WORK/resp.der" -resp_text -noverify >"$WORK/resp.txt" 2>&1
+this_update="$(sed -n 's/^ *This Update: //p' "$WORK/resp.txt" | head -1)"
+next_update="$(sed -n 's/^ *Next Update: //p' "$WORK/resp.txt" | head -1)"
+[[ $(to_epoch "$(hdr expires)") == "$(to_epoch "$next_update")" ]] ||
+	fail "OCSP GET: Expires $(hdr expires) is not nextUpdate $next_update"
+[[ $(to_epoch "$(hdr last-modified)") == "$(to_epoch "$this_update")" ]] ||
+	fail "OCSP GET: Last-Modified $(hdr last-modified) is not thisUpdate $this_update"
+max_age="$(hdr cache-control | sed -n 's/^max-age=\([0-9][0-9]*\), public, no-transform, must-revalidate$/\1/p')"
+[[ -n $max_age ]] && ((t0 + max_age < $(to_epoch "$next_update"))) ||
+	fail "OCSP GET: Cache-Control $(hdr cache-control) does not end before nextUpdate $next_update"
+[[ $(hdr etag) == "\"$(openssl dgst -sha256 -r "$WORK/resp.der" | cut -d' ' -f1)\"" ]] ||
+	fail "OCSP GET: ETag $(hdr etag) is not the SHA-256 of the response"
 openssl ocsp -respin "$WORK/resp.der" -issuer "$PKI/ca/region/ca.pem" -sha256 -cert "$rpsap" \
 	-CAfile "$PKI/trust/pca.pem" -verify_other "$WORK/cas.pem" >"$WORK/ocsp.out" 2>&1 || true
 expect_status "$rpsap" good
@@ -250,6 +278,29 @@ expect_status "$PKI/ca/region/ca.pem" good
 openssl ocsp -issuer "$PKI/ca/region/ca.pem" -sha256 -serial 0x123456789 -url "$OCSP/region" \
 	-CAfile "$PKI/trust/pca.pem" -verify_other "$WORK/cas.pem" -no_nonce >"$WORK/ocsp.out" 2>&1 || true
 expect_status 0x123456789 unknown
+# GET is strict (RFC 9919 6, RFC 3986, RFC 4648 3.2): an unescaped '/', an
+# unescaped "//" (never redirected) and missing padding are malformedRequest.
+get_status() { curl -s -o "$WORK/get.der" -w '%{http_code}' "$OCSP/region/$1"; }
+raw="$b64"
+[[ $raw == */* ]] || raw="MAo/MAo="
+for path in "$raw" "MAo//MAo="; do
+	[[ $(get_status "$path") == 200 && $(od -An -tx1 "$WORK/get.der" | tr -d ' \n') == 30030a0101 ]] ||
+		fail "OCSP GET with an unescaped '/' ($path): not answered malformedRequest"
+done
+unpadded=""
+for n in 1 2 3; do
+	certs=()
+	for ((i = 0; i < n; i++)); do certs+=(-cert "$rpsap"); done
+	openssl ocsp -issuer "$PKI/ca/region/ca.pem" -sha256 "${certs[@]}" -no_nonce -reqout "$WORK/req$n.der" >/dev/null
+	p="$(base64 <"$WORK/req$n.der" | tr -d '\n')"
+	if [[ $p == *= ]]; then
+		unpadded="${p%%=*}"
+		break
+	fi
+done
+[[ -n $unpadded ]] || fail "no request with base64 padding to test"
+[[ $(get_status "${unpadded//\//%2F}") == 200 && $(od -An -tx1 "$WORK/get.der" | tr -d ' \n') == 30030a0101 ]] ||
+	fail "OCSP GET without base64 padding: not answered malformedRequest"
 # A malformed request gets malformedRequest and the server stays up.
 [[ $(curl -fsS --data-binary garbage -H 'Content-Type: application/ocsp-request' "$OCSP/region" | od -An -tx1 | tr -d ' \n') == 30030a0101 ]] ||
 	fail "malformed OCSP request: not answered malformedRequest"
@@ -268,6 +319,7 @@ grep -q 'Responder Id: C = US, O = Mock Region 911, OU = ICA-3, CN = Mock Region
 ocsp_q region "$rpsap" sha256 -resp_text
 grep -q 'Responder Id: C = US, O = Mock Region 911, CN = ocsp.ica.region.mock.test' "$WORK/ocsp.out" ||
 	fail "delegated mode: responder is not the responder certificate"
+grep -q 'OCSP No Check' "$WORK/ocsp.out" || fail "delegated mode: the responder certificate lacks id-pkix-ocsp-nocheck"
 old_responder="$(openssl x509 -in "$PKI/ca/region/ocsp/cert.pem" -noout -serial | cut -d= -f2)"
 "$M" ocsp-signer --ca region --rotate 2>/dev/null
 [[ $(openssl x509 -in "$PKI/ca/region/ocsp/cert.pem" -noout -serial | cut -d= -f2) != "$old_responder" ]] ||
@@ -324,6 +376,19 @@ expect_status "$rpsap" unknown
 fault --wrong-signer
 ocsp_q region "$rpsap" sha256
 grep -q 'Response Verify Failure' "$WORK/ocsp.out" || fail "fault wrong-signer: $(cat "$WORK/ocsp.out")"
+# A responder certificate issued by the CA without id-pkix-ocsp-nocheck (a
+# negative fixture). OpenSSL's client accepts the response: it never checks a
+# responder's own revocation status; mockpca-lint reports the certificate.
+fault --no-nocheck
+ocsp_q region "$rpsap" sha256 -resp_text
+expect_status "$rpsap" good
+grep -q 'Responder Id: .*CN = negative-no-nocheck.ocsp.ica.region.mock.test' "$WORK/ocsp.out" ||
+	fail "fault no-nocheck: not signed by the fixture: $(cat "$WORK/ocsp.out")"
+! grep -q 'OCSP No Check' "$WORK/ocsp.out" || fail "fault no-nocheck: the fixture carries id-pkix-ocsp-nocheck"
+expect_fail "lint of the no-nocheck fixture" "$M" lint -profile ocsp-responder -issuer "$PKI/ca/region/ca.pem" \
+	-root "$PKI/trust/pca.pem" "$PKI/ca/region/ocsp/negative-no-nocheck/cert.pem"
+grep -q 'id-pkix-ocsp-nocheck is missing' "$WORK/out" || fail "lint of the no-nocheck fixture: $(cat "$WORK/out")"
+expect_fail "--wrong-signer with --no-nocheck" "$M" ocsp-fault --ca region --wrong-signer --no-nocheck
 fault --stale
 curl -fsS -o "$WORK/stale1.der" --data-binary @"$WORK/req.der" "$OCSP/region"
 sleep 2

@@ -88,7 +88,7 @@ of this profile; the rest is our interpretation, see [CP-NOTES.md](CP-NOTES.md) 
 | certificatePolicies | non-critical, `1.3.6.1.4.1.55670.1` | 4.10 (a CSS asserts the policy OIDs it is authoritative for) | E |
 | subjectAltName | Quad ID `elementId/ocsp.<CA iD>/OCSPResponder/<CA owner>` | 7.1.2.11 | E |
 | SKI / AKI | Method 1 | Tables 32/33, 19/20 | E |
-| AIA / CDP | not included (nocheck: no revocation checking of the responder) | — | optional |
+| AIA / CDP | not included (nocheck: no revocation checking of the responder) | RFC 5019 2.2.2 (RFC 9919 3.2.2) recommends neither | W |
 | Issuer | the CA it answers for; the PCA may issue its own (CSS Certificates, 1.4.1) | 7.3 | E (signature, nesting) |
 
 ## OCSP responses
@@ -100,7 +100,8 @@ of this profile; the rest is our interpretation, see [CP-NOTES.md](CP-NOTES.md) 
 | CertID hashes | SHA-256 and SHA-1 answered | RFC 9919 3.1.1, RFC 5019 |
 | thisUpdate / nextUpdate | always; nextUpdate 60 minutes by default (`serve --ocsp-nmin`) | RFC 5019 2.2.4 (RFC 9919 3.2.4); client freshness check: RFC 5019 4 (RFC 9919 5) |
 | Nonces | ignored (no nonce in responses) | RFC 5019 2.2.1, 4 (RFC 9919 3.2.1, 5) |
-| HTTP | GET (URL-encoded base64) and POST, `application/ocsp-response`, `Cache-Control: max-age` within nextUpdate | RFC 6960 A.1, RFC 5019 5, 6.2 (RFC 9919 6, 7.2) |
+| HTTP requests | POST, and GET with the base64 request URL-encoded in the path; GET is strict: `/` must be `%2F` and padding present, otherwise `malformedRequest` | RFC 6960 A.1, RFC 9919 6 (RFC 3986, RFC 4648 3.2, 4) |
+| HTTP responses | `application/ocsp-response`; Last-Modified = thisUpdate, Expires = nextUpdate, `Cache-Control: max-age=<n>, public, no-transform, must-revalidate` with n ending before nextUpdate, ETag = hex SHA-256 of the response; `no-cache` only on unsigned error responses | RFC 9919 6, 7.2 (RFC 5019 5, 6.2) |
 
 ## CRLs (`ca.cnf`)
 
