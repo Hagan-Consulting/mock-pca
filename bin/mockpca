@@ -739,16 +739,18 @@ cmd_serve() {
 	done
 	((hours > 0)) || die "--crl-hours must be at least 1"
 	kv_set "$PKI/pki.conf" crl_hours "$hours"
-	local serve pid
+	local serve pid sleeper=""
 	serve="$(go_tool mockpca-serve)"
 	cmd_crl --all
 	"$serve" -root "$PKI/www" -listen "$listen" &
 	pid=$!
-	trap 'kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; exit 0' INT TERM
+	trap 'kill "$pid" $sleeper 2>/dev/null; wait "$pid" 2>/dev/null; exit 0' INT TERM
 	note "serving $PKI/www on $listen; CRLs are republished every $((hours * 30)) minutes (half their lifetime)"
 	while kill -0 "$pid" 2>/dev/null; do
-		sleep $((hours * 1800)) &
-		wait $! || true
+		sleep $((hours * 1800)) </dev/null >/dev/null 2>&1 &
+		sleeper=$!
+		wait "$sleeper" || true
+		sleeper=""
 		kill -0 "$pid" 2>/dev/null || break
 		cmd_crl --all
 	done
