@@ -1,0 +1,791 @@
+#!/usr/bin/env bash
+# mockpca: development-only mock of the NG9-1-1 PCA PKI (CP v1.3).
+#
+# Creates a mock PCA root, ICAs and End-Entity certificates with OpenSSL,
+# checks every certificate with mockpca-lint, revokes certificates and
+# publishes CRLs. Run `mockpca help` for usage. NOT FOR PRODUCTION.
+set -euo pipefail
+umask 077
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PROFILES="$ROOT/profiles"
+CA_CNF="$PROFILES/ca.cnf"
+OPENSSL="${OPENSSL:-openssl}"
+PKI="${MOCKPCA_PKI:-$PWD/pki}"
+POLICY_OID="1.3.6.1.4.1.55670.1"
+QUAD_OID="1.3.6.1.4.1.55670.1.1"
+# Git Bash: keep -subj values ("/C=...", "/O=...") from being rewritten as
+# Windows paths. No effect elsewhere.
+export MSYS2_ARG_CONV_EXCL="/C=;/O="
+# Ignore any system-wide OpenSSL configuration.
+export OPENSSL_CONF=/dev/null
+
+# Paths removed when the script exits (temporary files, failed issuances).
+CLEANUP=()
+cleanup() { ((${#CLEANUP[@]} == 0)) || rm -rf -- "${CLEANUP[@]}"; }
+trap cleanup EXIT
+
+usage() {
+	cat <<'EOF'
+mockpca: development-only mock of the NG9-1-1 PCA PKI (CP v1.3). NOT FOR PRODUCTION.
+
+usage: mockpca [--pki DIR] COMMAND [options]
+
+The PKI directory defaults to $MOCKPCA_PKI, else ./pki.
+
+Commands:
+  init      Create the PKI directory and the mock PCA root.
+              --base-url URL   base of the CRL/CA certificate/OCSP URLs baked into certificates (required),
+                               e.g. http://pca.mock.test:8080
+              --id FQDN        PCA iD for the Quad ID (required)
+              [--org ORG] [--country CC] [--cn CN] [--ou-serial N] [--days N]
+  ica       Create an ICA under the PCA or another ICA.
+              --name NAME --parent CA --id FQDN --owner AGENCY_ID --org ORG --label LABEL
+              [--pathlen N] [--country CC] [--st ST] [--l L] [--ou-serial N] [--days N]
+              CN becomes "<LABEL> ICA Tier<n>".
+  issue     Generate a key pair and issue an End-Entity certificate.
+              --ca CA --profile agency|agent|element|service|signing --name NAME --id ID --roles R1[,R2...]
+              --org ORG [--owner AGENCY_ID] [--dns NAME]... [--ip ADDR]... [--ou OU] [--st ST] [--l L]
+              [--country CC] [--days N] [--key rsa:BITS|ec:CURVE] [--id-type TYPE]
+  sign-csr  Like issue, for an externally generated key: --csr FILE instead of --key.
+  revoke    Revoke a certificate and republish its issuer's CRL.
+              --ee NAME | --ca NAME   [--reason REASON]
+  crl       Regenerate and publish CRLs.   --ca NAME | --all   [--hours N | --seconds N]
+  verify    Verify a certificate with OpenSSL (chain, CP policy OID, CRLs).   --ee NAME | --ca NAME  [--no-crl]
+  list      List CAs and End-Entity certificates with their status.
+  lint      Run mockpca-lint on certificate files.   [mockpca-lint flags] FILE...
+  serve     Serve CA certificates and CRLs over HTTP and refresh CRLs.   [--listen ADDR] [--crl-hours N]
+  help      Show this help.
+
+See README.md and docs/ for details.
+EOF
+}
+
+die() {
+	echo "mockpca: $*" >&2
+	exit 1
+}
+
+note() { echo "mockpca: $*" >&2; }
+
+# ---------------------------------------------------------------------------
+# Input validation. Every value that ends up in an OpenSSL config file or
+# command line is checked here first.
+
+LABEL_RE='[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?'
+FQDN_RE="^(${LABEL_RE}\\.)+${LABEL_RE}\$"
+DNS_RE="^(${LABEL_RE}\\.)*${LABEL_RE}\$"
+
+valid_name() { [[ $1 =~ ^[a-z0-9][a-z0-9-]{0,62}$ ]]; }
+valid_fqdn() { [[ ${#1} -le 253 && $1 =~ $FQDN_RE ]]; }
+valid_agent_id() {
+	local user="${1%%@*}" host="${1#*@}"
+	if [[ $1 != *@* ]]; then
+		valid_fqdn "$1"
+	else
+		[[ $user =~ ^[A-Za-z0-9._-]{1,64}$ ]] && valid_fqdn "$host"
+	fi
+}
+valid_roles() { [[ $1 =~ ^[A-Za-z0-9:._-]+(,[A-Za-z0-9:._-]+)*$ ]]; }
+valid_country() { [[ $1 =~ ^[A-Z]{2}$ ]]; }
+valid_int() { [[ $1 =~ ^[0-9]{1,9}$ ]]; }
+
+check_name() { valid_name "$2" || die "$1: '$2' is not a valid name (lower-case letters, digits, '-')"; }
+check_int() { valid_int "$2" || die "$1: '$2' is not a non-negative integer"; }
+
+# DN attribute values: no control characters or characters that are special
+# in OpenSSL config files; at most 64 characters (RFC 5280 upper bounds).
+check_dn() {
+	local opt="$1" v="$2"
+	[[ -n $v ]] || die "$opt must not be empty"
+	[[ $v =~ [[:cntrl:]] || $v == *'#'* || $v == *'$'* || $v == *'\'* || $v == *'"'* ]] &&
+		die "$opt: control characters, '#', '\$', '\\' and '\"' are not allowed"
+	[[ $v == " "* || $v == *" " ]] && die "$opt: leading or trailing space"
+	((${#v} <= 64)) || die "$opt: longer than 64 characters"
+}
+
+check_base_url() {
+	[[ $1 =~ ^https?://[A-Za-z0-9.-]+(:[0-9]{1,5})?(/[A-Za-z0-9._~-]+)*$ ]] ||
+		die "--base-url: '$1' must be http(s)://host[:port][/path] without a trailing slash, query or comma"
+}
+
+# ---------------------------------------------------------------------------
+# Small key=value state files (never sourced).
+
+kv_get() {
+	local file="$1" key="$2" k v
+	[[ -f $file ]] || die "missing $file"
+	while IFS='=' read -r k v; do
+		if [[ $k == "$key" ]]; then
+			printf '%s' "$v"
+			return 0
+		fi
+	done <"$file"
+	return 1
+}
+
+kv_set() {
+	local file="$1" key="$2" value="$3" tmp
+	[[ $value != *$'\n'* ]] || die "internal: newline in value for $key"
+	tmp="$file.tmp"
+	{
+		if [[ -f $file ]]; then grep -v "^$key=" "$file" || true; fi
+		printf '%s=%s\n' "$key" "$value"
+	} >"$tmp"
+	mv "$tmp" "$file"
+}
+
+# ---------------------------------------------------------------------------
+# Helpers.
+
+require_openssl() {
+	local v
+	v="$("$OPENSSL" version 2>/dev/null)" || die "'$OPENSSL' not found; install OpenSSL 3.x (set \$OPENSSL to its path)"
+	[[ $v =~ ^OpenSSL\ ([3-9]|[1-9][0-9])\. ]] || die "need OpenSSL 3.x or later, found: $v (LibreSSL is not supported)"
+}
+
+require_pki() { [[ -f $PKI/pki.conf ]] || die "no PKI at $PKI (run 'mockpca init' or pass --pki)"; }
+
+base_url() { kv_get "$PKI/pki.conf" base_url; }
+
+ca_dir() {
+	local d="$PKI/ca/$1"
+	[[ -f $d/ca.conf ]] || die "no CA named '$1'"
+	printf '%s' "$d"
+}
+
+# require_active_ca NAME: refuse to issue from a revoked CA.
+require_active_ca() {
+	local d parent
+	d="$(ca_dir "$1")"
+	parent="$(kv_get "$d/ca.conf" parent || true)"
+	[[ -z $parent || $(status_of "$d/ca.pem" "$parent") != R ]] || die "CA '$1' is revoked"
+}
+
+ee_dir() {
+	local d="$PKI/ee/$1"
+	[[ -f $d/ee.conf ]] || die "no End-Entity certificate named '$1'"
+	printf '%s' "$d"
+}
+
+# Tools are built from this checkout on first use (go build caches).
+go_tool() {
+	local name="$1" exe
+	command -v go >/dev/null 2>&1 || die "Go is required to build $name (see README)"
+	exe="$ROOT/.build/$name$(go env GOEXE)"
+	(cd "$ROOT" && go build -o "$exe" "./cmd/$name") || die "building $name failed"
+	printf '%s' "$exe"
+}
+
+run_lint() {
+	local profile="$1" cert="$2" issuer="${3:-}" lint
+	lint="${MOCKPCA_LINT:-$(go_tool mockpca-lint)}"
+	if [[ -n $issuer ]]; then
+		"$lint" -q -profile "$profile" -issuer "$issuer" "$cert"
+	else
+		"$lint" -q -profile "$profile" "$cert"
+	fi
+}
+
+# Escape a value for an `openssl -subj` argument.
+subj_escape() {
+	local v="${1//\//\\/}"
+	printf '%s' "${v//+/\\+}"
+}
+
+# notAfter of a certificate as YYYYMMDDHHMMSSZ.
+not_after() {
+	local d
+	d="$("$OPENSSL" x509 -in "$1" -noout -enddate -dateopt iso_8601)"
+	d="${d#notAfter=}"
+	d="${d//[^0-9]/}"
+	printf '%sZ' "$d"
+}
+
+# validity_args ISSUER_CERT DAYS: prints openssl ca validity options, capped
+# at the issuer's notAfter (CP 6.3.2: validity periods are nested).
+validity_args() {
+	local issuer="$1" days="$2"
+	if "$OPENSSL" x509 -in "$issuer" -noout -checkend $((days * 86400)) >/dev/null; then
+		printf -- '-days\n%s\n' "$days"
+	else
+		note "validity capped at the issuer's notAfter ($(not_after "$issuer"))"
+		printf -- '-enddate\n%s\n' "$(not_after "$issuer")"
+	fi
+}
+
+genkey() {
+	local spec="$1" out="$2"
+	case "$spec" in
+	rsa:2048 | rsa:3072 | rsa:4096)
+		"$OPENSSL" genpkey -algorithm RSA -pkeyopt "rsa_keygen_bits:${spec#rsa:}" -out "$out" 2>/dev/null
+		;;
+	ec:P-256 | ec:P-384 | ec:P-521)
+		"$OPENSSL" genpkey -algorithm EC -pkeyopt "ec_paramgen_curve:${spec#ec:}" -out "$out"
+		;;
+	*) die "--key: '$spec' is not one of rsa:2048, rsa:3072, rsa:4096, ec:P-256, ec:P-384, ec:P-521" ;;
+	esac
+}
+
+# write_issue_cnf FILE PROFILE QUAD DNS_LIST IP_LIST VARS...
+# Writes the per-issuance OpenSSL config: URL/pathlen variables, the request
+# section, the profile's extension section and the subjectAltName section.
+write_issue_cnf() {
+	local file="$1" profile="$2" quad="$3" dns="$4" ips="$5" i=0 v
+	shift 5
+	{
+		echo "# Generated by mockpca on $(date -u +%Y-%m-%dT%H:%M:%SZ). Profile: $profile."
+		for v in "$@"; do echo "$v"; done
+		cat <<-EOF
+
+			[ req ]
+			distinguished_name = mockpca_dn
+			prompt             = no
+			utf8               = yes
+			string_mask        = MASK:0x2002
+
+			# The subject is set with -subj when the certificate is signed.
+			[ mockpca_dn ]
+			O = mockpca request
+
+		EOF
+		cat "$PROFILES/$profile.ext"
+		echo
+		echo "[ mockpca_san ]"
+		echo "otherName.0 = $QUAD_OID;UTF8:$quad"
+		for v in $dns; do
+			echo "DNS.$i = $v"
+			i=$((i + 1))
+		done
+		i=0
+		for v in $ips; do
+			echo "IP.$i = $v"
+			i=$((i + 1))
+		done
+	} >"$file"
+}
+
+publish_ca_cert() {
+	local name="$1" d
+	d="$(ca_dir "$name")"
+	"$OPENSSL" x509 -in "$d/ca.pem" -outform DER -out "$PKI/www/certs/$name.cer.tmp"
+	mv "$PKI/www/certs/$name.cer.tmp" "$PKI/www/certs/$name.cer"
+}
+
+# gen_crl NAME [crl-period-option value]
+gen_crl() {
+	local name="$1" d period=("${@:2}")
+	d="$(ca_dir "$name")"
+	[[ ${#period[@]} -gt 0 ]] || period=(-crlhours "$(kv_get "$PKI/pki.conf" crl_hours)")
+	(cd "$d" && "$OPENSSL" ca -config "$CA_CNF" -gencrl "${period[@]}" -out crl.pem.tmp 2>/dev/null) ||
+		die "CRL generation for '$name' failed"
+	mv "$d/crl.pem.tmp" "$d/crl.pem"
+	"$OPENSSL" crl -in "$d/crl.pem" -outform DER -out "$PKI/www/crl/$name.crl.tmp"
+	mv "$PKI/www/crl/$name.crl.tmp" "$PKI/www/crl/$name.crl"
+}
+
+# chain_of CA: the CA certificate followed by its issuers, excluding the PCA.
+chain_of() {
+	local name="$1" d parent
+	while [[ -n $name ]]; do
+		d="$(ca_dir "$name")"
+		[[ $(kv_get "$d/ca.conf" profile) == pca ]] && break
+		cat "$d/ca.pem"
+		parent="$(kv_get "$d/ca.conf" parent)"
+		name="$parent"
+	done
+}
+
+serial_of() {
+	local s
+	s="$("$OPENSSL" x509 -in "$1" -noout -serial)"
+	printf '%s' "${s#serial=}"
+}
+
+# status_of CERT CA_NAME: V (valid), R (revoked) or E (expired) from the
+# issuer's database.
+status_of() {
+	local serial d st
+	serial="$(serial_of "$1")"
+	d="$(ca_dir "$2")"
+	# Tab-separated: status, expiry, revocation date (often empty), serial, ...
+	st="$(awk -F'\t' -v s="${serial^^}" 'toupper($4) == s { print $1 }' "$d/index.txt")"
+	if [[ $st == V ]] && ! "$OPENSSL" x509 -in "$1" -noout -checkend 0 >/dev/null; then
+		st=E
+	fi
+	printf '%s' "${st:-?}"
+}
+
+# ---------------------------------------------------------------------------
+# Commands.
+
+cmd_init() {
+	local base_url="" id="" org="MOCK NG911 PCA - NOT FOR PRODUCTION" country="US" cn="PCA Root" ou_serial=1 days=3650
+	while (($#)); do
+		case "$1" in
+		--base-url) base_url="${2:?}"; shift 2 ;;
+		--id) id="${2:?}"; shift 2 ;;
+		--org) org="${2:?}"; shift 2 ;;
+		--country) country="${2:?}"; shift 2 ;;
+		--cn) cn="${2:?}"; shift 2 ;;
+		--ou-serial) ou_serial="${2:?}"; shift 2 ;;
+		--days) days="${2:?}"; shift 2 ;;
+		*) die "init: unknown option $1" ;;
+		esac
+	done
+	[[ -n $base_url ]] || die "init: --base-url is required"
+	[[ -n $id ]] || die "init: --id is required"
+	base_url="${base_url%/}"
+	check_base_url "$base_url"
+	valid_fqdn "$id" || die "--id: '$id' is not a lower-case FQDN"
+	check_dn --org "$org"
+	check_dn --cn "$cn"
+	valid_country "$country" || die "--country: two upper-case letters (ISO 3166-1)"
+	check_int --ou-serial "$ou_serial"
+	check_int --days "$days"
+	((days <= 3652)) || die "--days: the PCA certificate is valid for at most 10 years (CP Table 12)"
+	[[ ! -e $PKI/pki.conf ]] || die "a PKI already exists at $PKI"
+
+	mkdir -p "$PKI"/{ca,ee,trust,www/certs,www/crl}
+	kv_set "$PKI/pki.conf" base_url "$base_url"
+	kv_set "$PKI/pki.conf" country "$country"
+	kv_set "$PKI/pki.conf" crl_hours 24
+	kv_set "$PKI/pki.conf" next_ica_serial 1
+
+	local name=pca d="$PKI/ca/pca"
+	mkdir -p "$d/newcerts"
+	: >"$d/index.txt"
+	echo 01 >"$d/crlnumber"
+	note "generating the PCA key (RSA 4096)"
+	genkey rsa:4096 "$d/ca.key"
+	write_issue_cnf "$d/issue.cnf" pca "cAId/$id/PCA/$id" "" ""
+	"$OPENSSL" req -new -config "$d/issue.cnf" -key "$d/ca.key" -out "$d/ca.csr"
+	(cd "$d" && "$OPENSSL" ca -batch -config "$CA_CNF" -selfsign -keyfile ca.key -in ca.csr -out ca.pem \
+		-extfile issue.cnf -extensions mockpca_ext -days "$days" -notext \
+		-subj "/C=$country/O=$(subj_escape "$org")/OU=PCA-$ou_serial/CN=$(subj_escape "$cn")" 2>/dev/null) ||
+		die "issuing the PCA certificate failed"
+	kv_set "$d/ca.conf" profile pca
+	kv_set "$d/ca.conf" tier 1
+	kv_set "$d/ca.conf" id "$id"
+	run_lint pca "$d/ca.pem" || die "the PCA certificate does not conform to the CP profile (see above)"
+	cp "$d/ca.pem" "$PKI/trust/pca.pem"
+	publish_ca_cert "$name"
+	gen_crl "$name"
+	note "PCA created: $d/ca.pem (trust anchor: $PKI/trust/pca.pem)"
+}
+
+cmd_ica() {
+	local name="" parent="" id="" owner="" org="" label="" pathlen="" country="" st="" l="" ou_serial="" days=1095
+	while (($#)); do
+		case "$1" in
+		--name) name="${2:?}"; shift 2 ;;
+		--parent) parent="${2:?}"; shift 2 ;;
+		--id) id="${2:?}"; shift 2 ;;
+		--owner) owner="${2:?}"; shift 2 ;;
+		--org) org="${2:?}"; shift 2 ;;
+		--label) label="${2:?}"; shift 2 ;;
+		--pathlen) pathlen="${2:?}"; shift 2 ;;
+		--country) country="${2:?}"; shift 2 ;;
+		--st) st="${2:?}"; shift 2 ;;
+		--l) l="${2:?}"; shift 2 ;;
+		--ou-serial) ou_serial="${2:?}"; shift 2 ;;
+		--days) days="${2:?}"; shift 2 ;;
+		*) die "ica: unknown option $1" ;;
+		esac
+	done
+	require_pki
+	for v in name parent id owner org label; do
+		[[ -n ${!v} ]] || die "ica: --$v is required"
+	done
+	check_name --name "$name"
+	check_name --parent "$parent"
+	valid_fqdn "$id" || die "--id: '$id' is not a lower-case FQDN"
+	valid_fqdn "$owner" || die "--owner: '$owner' is not a lower-case FQDN"
+	check_dn --org "$org"
+	check_dn --label "$label"
+	[[ -z $st ]] || check_dn --st "$st"
+	[[ -z $l ]] || check_dn --l "$l"
+	country="${country:-$(kv_get "$PKI/pki.conf" country)}"
+	valid_country "$country" || die "--country: two upper-case letters (ISO 3166-1)"
+	check_int --days "$days"
+	((days <= 1095)) || die "--days: an ICA certificate is valid for at most 3 years (CP Table 12)"
+	[[ ! -e $PKI/ca/$name ]] || die "a CA named '$name' already exists"
+
+	local pd ptier pprofile ppathlen tier
+	pd="$(ca_dir "$parent")"
+	require_active_ca "$parent"
+	ptier="$(kv_get "$pd/ca.conf" tier)"
+	pprofile="$(kv_get "$pd/ca.conf" profile)"
+	tier=$((ptier + 1))
+	if [[ $pprofile == pca ]]; then
+		pathlen="${pathlen:-1}"
+		[[ $pathlen =~ ^[0-3]$ ]] || die "--pathlen: a Tier-2 ICA takes 0-3 (CP Table 22)"
+	else
+		ppathlen="$(kv_get "$pd/ca.conf" pathlen)"
+		((ppathlen > 0)) || die "CA '$parent' has pathLenConstraint 0 and cannot issue ICAs"
+		[[ -z $pathlen || $pathlen == $((ppathlen - 1)) ]] ||
+			die "--pathlen: a Tier-$tier ICA takes its issuer's pathLenConstraint minus one ($((ppathlen - 1)), CP Table 23)"
+		pathlen=$((ppathlen - 1))
+	fi
+	if [[ -z $ou_serial ]]; then
+		ou_serial="$(kv_get "$PKI/pki.conf" next_ica_serial)"
+		kv_set "$PKI/pki.conf" next_ica_serial $((ou_serial + 1))
+	fi
+	check_int --ou-serial "$ou_serial"
+	local cn="$label ICA Tier$tier"
+	check_dn "CN ($cn)" "$cn"
+
+	local d="$PKI/ca/$name" base subj
+	base="$(base_url)"
+	mkdir -p "$d/newcerts"
+	: >"$d/index.txt"
+	echo 01 >"$d/crlnumber"
+	note "generating the key of ICA '$name' (RSA 3072)"
+	genkey rsa:3072 "$d/ca.key"
+	write_issue_cnf "$d/issue.cnf" ica "cAId/$id/ICA/$owner" "" "" \
+		"MOCKPCA_OCSP_URL = $base/ocsp/$parent" \
+		"MOCKPCA_CRL_URL = $base/crl/$parent.crl" \
+		"MOCKPCA_PATHLEN = $pathlen"
+	"$OPENSSL" req -new -config "$d/issue.cnf" -key "$d/ca.key" -out "$d/ca.csr"
+	subj="/C=$country"
+	[[ -z $st ]] || subj+="/ST=$(subj_escape "$st")"
+	[[ -z $l ]] || subj+="/L=$(subj_escape "$l")"
+	subj+="/O=$(subj_escape "$org")/OU=ICA-$ou_serial/CN=$(subj_escape "$cn")"
+	local validity
+	mapfile -t validity < <(validity_args "$pd/ca.pem" "$days")
+	(cd "$pd" && "$OPENSSL" ca -batch -config "$CA_CNF" -in "$d/ca.csr" -out "$d/ca.pem" \
+		-extfile "$d/issue.cnf" -extensions mockpca_ext "${validity[@]}" -notext -subj "$subj" 2>/dev/null) ||
+		die "issuing the ICA certificate failed"
+	kv_set "$d/ca.conf" profile ica
+	kv_set "$d/ca.conf" parent "$parent"
+	kv_set "$d/ca.conf" tier "$tier"
+	kv_set "$d/ca.conf" pathlen "$pathlen"
+	kv_set "$d/ca.conf" id "$id"
+	run_lint ica "$d/ca.pem" "$pd/ca.pem" || die "the ICA certificate does not conform to the CP profile (see above)"
+	chain_of "$name" >"$d/chain.pem"
+	publish_ca_cert "$name"
+	gen_crl "$name"
+	note "ICA '$name' (Tier $tier, pathLenConstraint $pathlen) created: $d/ca.pem"
+}
+
+# issue and sign-csr share the option parsing and the signing step.
+cmd_issue() {
+	local mode="$1"
+	shift
+	local ca="" profile="" name="" id="" roles="" owner="" org="" ou="" st="" l="" country="" days=90
+	local key_spec="" csr="" id_type="" dns=() ips=()
+	while (($#)); do
+		case "$1" in
+		--ca) ca="${2:?}"; shift 2 ;;
+		--profile) profile="${2:?}"; shift 2 ;;
+		--name) name="${2:?}"; shift 2 ;;
+		--id) id="${2:?}"; shift 2 ;;
+		--roles) roles="${2:?}"; shift 2 ;;
+		--owner) owner="${2:?}"; shift 2 ;;
+		--org) org="${2:?}"; shift 2 ;;
+		--ou) ou="${2:?}"; shift 2 ;;
+		--st) st="${2:?}"; shift 2 ;;
+		--l) l="${2:?}"; shift 2 ;;
+		--country) country="${2:?}"; shift 2 ;;
+		--days) days="${2:?}"; shift 2 ;;
+		--dns) dns+=("${2:?}"); shift 2 ;;
+		--ip) ips+=("${2:?}"); shift 2 ;;
+		--id-type) id_type="${2:?}"; shift 2 ;;
+		--key)
+			[[ $mode == issue ]] || die "sign-csr: --key is not used (the key is in the CSR)"
+			key_spec="${2:?}"; shift 2 ;;
+		--csr)
+			[[ $mode == sign-csr ]] || die "issue: --csr is only for sign-csr"
+			csr="${2:?}"; shift 2 ;;
+		*) die "$mode: unknown option $1" ;;
+		esac
+	done
+	require_pki
+	for v in ca profile name id roles org; do
+		[[ -n ${!v} ]] || die "$mode: --$v is required"
+	done
+	[[ $mode == issue || -n $csr ]] || die "sign-csr: --csr is required"
+	check_name --ca "$ca"
+	check_name --name "$name"
+	[[ ! -e $PKI/ee/$name ]] || die "an End-Entity certificate named '$name' already exists"
+
+	local default_type
+	case "$profile" in
+	agency) default_type=agencyId ;;
+	agent) default_type=agentId ;;
+	element) default_type=elementId ;;
+	service) default_type=serviceId ;;
+	signing) default_type=elementId ;;
+	*) die "--profile: one of agency, agent, element, service, signing" ;;
+	esac
+	if [[ -n $id_type && $profile != signing ]]; then
+		die "--id-type is only for the signing profile ($profile uses $default_type)"
+	fi
+	id_type="${id_type:-$default_type}"
+	[[ $id_type =~ ^(agencyId|agentId|elementId|serviceId)$ ]] || die "--id-type: agencyId, agentId, elementId or serviceId"
+
+	if [[ $profile == agent ]]; then
+		valid_agent_id "$id" || die "--id: '$id' is not user@fqdn or a lower-case FQDN"
+	else
+		valid_fqdn "$id" || die "--id: '$id' is not a lower-case FQDN"
+	fi
+	((${#id} <= 64)) || die "--id: the iD is also the subject CN, which holds at most 64 characters (RFC 5280)"
+	valid_roles "$roles" || die "--roles: comma-separated, no spaces; letters, digits, ':', '.', '_', '-'"
+	if [[ $profile == agency ]]; then
+		[[ -z $owner || $owner == "$id" ]] || die "--owner: an Agency Certificate's owner is its own iD (CP Table 28)"
+		owner="$id"
+	fi
+	[[ -n $owner ]] || die "$mode: --owner (iD of the controlling Agency) is required"
+	valid_fqdn "$owner" || die "--owner: '$owner' is not a lower-case FQDN"
+	check_dn --org "$org"
+	[[ -z $ou ]] || check_dn --ou "$ou"
+	[[ -z $st ]] || check_dn --st "$st"
+	[[ -z $l ]] || check_dn --l "$l"
+	country="${country:-$(kv_get "$PKI/pki.conf" country)}"
+	valid_country "$country" || die "--country: two upper-case letters (ISO 3166-1)"
+	check_int --days "$days"
+	((days <= 1095)) || die "--days: at most 3 years (CP Table 12)"
+
+	# The first dNSName is the iD (CP Table 30); Agency, Element and Service
+	# Certificates must have one.
+	local all_dns=() x
+	case "$profile" in
+	agency | element | service) all_dns=("$id") ;;
+	signing) [[ ${#dns[@]} -eq 0 ]] || all_dns=("$id") ;;
+	esac
+	for x in "${dns[@]}"; do
+		[[ $x =~ $DNS_RE && ${#x} -le 253 ]] || die "--dns: '$x' is not a lower-case DNS name (no wildcards)"
+		[[ $x == "$id" ]] || all_dns+=("$x")
+	done
+	for x in "${ips[@]}"; do
+		[[ $x =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ || $x =~ ^[0-9A-Fa-f:]+$ ]] || die "--ip: '$x' is not an IP address"
+	done
+
+	local cadir d base
+	cadir="$(ca_dir "$ca")"
+	require_active_ca "$ca"
+	d="$PKI/ee/$name"
+	base="$(base_url)"
+	mkdir -p "$d"
+	CLEANUP+=("$d")
+	write_issue_cnf "$d/issue.cnf" "$profile" "$id_type/$id/$roles/$owner" "${all_dns[*]:-}" "${ips[*]:-}" \
+		"MOCKPCA_CA_CERT_URL = $base/certs/$ca.cer" \
+		"MOCKPCA_OCSP_URL = $base/ocsp/$ca" \
+		"MOCKPCA_CRL_URL = $base/crl/$ca.crl"
+	if [[ $mode == issue ]]; then
+		if [[ -z $key_spec ]]; then
+			key_spec=rsa:2048
+			[[ $profile != signing ]] || key_spec=ec:P-256
+		fi
+		genkey "$key_spec" "$d/key.pem"
+		"$OPENSSL" req -new -config "$d/issue.cnf" -key "$d/key.pem" -out "$d/csr.pem"
+	else
+		"$OPENSSL" req -in "$csr" -noout -verify 2>/dev/null || die "--csr: '$csr' is not a CSR with a valid signature"
+		"$OPENSSL" req -in "$csr" -out "$d/csr.pem"
+	fi
+	local subj="/C=$country"
+	[[ -z $st ]] || subj+="/ST=$(subj_escape "$st")"
+	[[ -z $l ]] || subj+="/L=$(subj_escape "$l")"
+	subj+="/O=$(subj_escape "$org")"
+	[[ -z $ou ]] || subj+="/OU=$(subj_escape "$ou")"
+	subj+="/CN=$(subj_escape "$id")"
+	local validity
+	mapfile -t validity < <(validity_args "$cadir/ca.pem" "$days")
+	(cd "$cadir" && "$OPENSSL" ca -batch -config "$CA_CNF" -in "$d/csr.pem" -out "$d/cert.pem" \
+		-extfile "$d/issue.cnf" -extensions mockpca_ext "${validity[@]}" -notext -subj "$subj" 2>/dev/null) ||
+		die "issuing the certificate failed (is the CA's key valid and the CSR's key large enough?)"
+	CLEANUP=()
+	kv_set "$d/ee.conf" profile "$profile"
+	kv_set "$d/ee.conf" ca "$ca"
+	kv_set "$d/ee.conf" id "$id"
+	if ! run_lint "$profile" "$d/cert.pem" "$cadir/ca.pem"; then
+		mv "$d/cert.pem" "$d/cert.pem.lint-failed"
+		die "the certificate does not conform to the CP profile (see above); kept as $d/cert.pem.lint-failed"
+	fi
+	chain_of "$ca" >"$d/chain.pem"
+	cat "$d/cert.pem" "$d/chain.pem" >"$d/fullchain.pem"
+	note "issued $profile certificate '$name': $d/cert.pem (chain: fullchain.pem, key: ${key_spec:+key.pem}${csr:+external})"
+}
+
+cmd_revoke() {
+	local ee="" ca="" reason=unspecified
+	while (($#)); do
+		case "$1" in
+		--ee) ee="${2:?}"; shift 2 ;;
+		--ca) ca="${2:?}"; shift 2 ;;
+		--reason) reason="${2:?}"; shift 2 ;;
+		*) die "revoke: unknown option $1" ;;
+		esac
+	done
+	require_pki
+	[[ (-n $ee && -z $ca) || (-z $ee && -n $ca) ]] || die "revoke: give exactly one of --ee or --ca"
+	[[ $reason =~ ^(unspecified|keyCompromise|CACompromise|affiliationChanged|superseded|cessationOfOperation|certificateHold)$ ]] ||
+		die "--reason: unspecified, keyCompromise, CACompromise, affiliationChanged, superseded, cessationOfOperation or certificateHold"
+	local cert issuer
+	if [[ -n $ee ]]; then
+		check_name --ee "$ee"
+		cert="$(ee_dir "$ee")/cert.pem"
+		issuer="$(kv_get "$(ee_dir "$ee")/ee.conf" ca)"
+	else
+		check_name --ca "$ca"
+		[[ $(kv_get "$(ca_dir "$ca")/ca.conf" profile) != pca ]] || die "the PCA root cannot be revoked (remove it from trust bundles instead)"
+		cert="$(ca_dir "$ca")/ca.pem"
+		issuer="$(kv_get "$(ca_dir "$ca")/ca.conf" parent)"
+	fi
+	[[ $(status_of "$cert" "$issuer") != R ]] || die "already revoked"
+	(cd "$(ca_dir "$issuer")" && "$OPENSSL" ca -config "$CA_CNF" -revoke "$cert" -crl_reason "$reason" 2>/dev/null) ||
+		die "revocation failed"
+	gen_crl "$issuer"
+	note "revoked ${ee:-$ca} ($reason); CRL of '$issuer' republished"
+}
+
+cmd_crl() {
+	local ca="" all=0 period=()
+	while (($#)); do
+		case "$1" in
+		--ca) ca="${2:?}"; shift 2 ;;
+		--all) all=1; shift ;;
+		--hours) check_int --hours "${2:?}"; period=(-crlhours "$2"); shift 2 ;;
+		--seconds) check_int --seconds "${2:?}"; period=(-crlsec "$2"); shift 2 ;;
+		*) die "crl: unknown option $1" ;;
+		esac
+	done
+	require_pki
+	[[ (-n $ca && $all == 0) || (-z $ca && $all == 1) ]] || die "crl: give --ca NAME or --all"
+	local names=()
+	if ((all)); then
+		for d in "$PKI"/ca/*/; do names+=("$(basename "$d")"); done
+	else
+		check_name --ca "$ca"
+		names=("$ca")
+	fi
+	for n in "${names[@]}"; do
+		gen_crl "$n" "${period[@]}"
+		note "CRL of '$n' published: $PKI/www/crl/$n.crl"
+	done
+}
+
+cmd_verify() {
+	local ee="" ca="" crl=1
+	while (($#)); do
+		case "$1" in
+		--ee) ee="${2:?}"; shift 2 ;;
+		--ca) ca="${2:?}"; shift 2 ;;
+		--no-crl) crl=0; shift ;;
+		*) die "verify: unknown option $1" ;;
+		esac
+	done
+	require_pki
+	[[ (-n $ee && -z $ca) || (-z $ee && -n $ca) ]] || die "verify: give exactly one of --ee or --ca"
+	local cert issuer
+	if [[ -n $ee ]]; then
+		check_name --ee "$ee"
+		cert="$(ee_dir "$ee")/cert.pem"
+		issuer="$(kv_get "$(ee_dir "$ee")/ee.conf" ca)"
+	else
+		check_name --ca "$ca"
+		cert="$(ca_dir "$ca")/ca.pem"
+		issuer="$(kv_get "$(ca_dir "$ca")/ca.conf" parent || true)"
+	fi
+	local tmp args=(-x509_strict -CAfile "$PKI/trust/pca.pem")
+	tmp="$(mktemp -d "$PKI/.verify.XXXXXX")"
+	CLEANUP+=("$tmp")
+	: >"$tmp/chain.pem"
+	[[ -z $issuer ]] || chain_of "$issuer" >"$tmp/chain.pem"
+	[[ ! -s $tmp/chain.pem ]] || args+=(-untrusted "$tmp/chain.pem")
+	# The PCA certificate itself asserts no policy (CP Table 14).
+	[[ $cert == "$PKI/trust/pca.pem" || -z $issuer ]] ||
+		args+=(-policy_check -explicit_policy -policy "$POLICY_OID")
+	if ((crl)); then
+		cat "$PKI"/ca/*/crl.pem >"$tmp/crls.pem"
+		args+=(-crl_check_all -CRLfile "$tmp/crls.pem")
+	fi
+	"$OPENSSL" verify "${args[@]}" "$cert"
+}
+
+cmd_list() {
+	require_pki
+	local d name
+	printf '%-16s %-8s %-5s %-16s %-6s %s\n' NAME PROFILE TIER ISSUER STATUS "NOT AFTER"
+	for d in "$PKI"/ca/*/; do
+		name="$(basename "$d")"
+		[[ -f $d/ca.pem ]] || continue
+		local parent st=V
+		parent="$(kv_get "$d/ca.conf" parent || true)"
+		[[ -z $parent ]] || st="$(status_of "$d/ca.pem" "$parent")"
+		printf '%-16s %-8s %-5s %-16s %-6s %s\n' "$name" "$(kv_get "$d/ca.conf" profile)" \
+			"$(kv_get "$d/ca.conf" tier)" "${parent:--}" "$st" "$(not_after "$d/ca.pem")"
+	done
+	for d in "$PKI"/ee/*/; do
+		[[ -f $d/cert.pem ]] || continue
+		name="$(basename "$d")"
+		local ca
+		ca="$(kv_get "$d/ee.conf" ca)"
+		printf '%-16s %-8s %-5s %-16s %-6s %s\n' "$name" "$(kv_get "$d/ee.conf" profile)" "-" "$ca" \
+			"$(status_of "$d/cert.pem" "$ca")" "$(not_after "$d/cert.pem")"
+	done
+}
+
+cmd_serve() {
+	local listen="127.0.0.1:8080" hours
+	require_pki
+	hours="$(kv_get "$PKI/pki.conf" crl_hours)"
+	while (($#)); do
+		case "$1" in
+		--listen) listen="${2:?}"; shift 2 ;;
+		--crl-hours) check_int --crl-hours "${2:?}"; hours="$2"; shift 2 ;;
+		*) die "serve: unknown option $1" ;;
+		esac
+	done
+	((hours > 0)) || die "--crl-hours must be at least 1"
+	kv_set "$PKI/pki.conf" crl_hours "$hours"
+	local serve pid
+	serve="$(go_tool mockpca-serve)"
+	cmd_crl --all
+	"$serve" -root "$PKI/www" -listen "$listen" &
+	pid=$!
+	trap 'kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; exit 0' INT TERM
+	note "serving $PKI/www on $listen; CRLs are republished every $((hours * 30)) minutes (half their lifetime)"
+	while kill -0 "$pid" 2>/dev/null; do
+		sleep $((hours * 1800)) &
+		wait $! || true
+		kill -0 "$pid" 2>/dev/null || break
+		cmd_crl --all
+	done
+	wait "$pid"
+}
+
+main() {
+	if ((BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 4))); then
+		die "bash 4.4 or later is required (macOS: install bash from a package manager)"
+	fi
+	while (($#)); do
+		case "$1" in
+		--pki) PKI="${2:?}"; shift 2 ;;
+		-h | --help | help) usage; exit 0 ;;
+		-*) die "unknown option $1 (see 'mockpca help')" ;;
+		*) break ;;
+		esac
+	done
+	(($#)) || { usage >&2; exit 2; }
+	local cmd="$1"
+	shift
+	case "$cmd" in
+	lint) exec "${MOCKPCA_LINT:-$(go_tool mockpca-lint)}" "$@" ;;
+	esac
+	require_openssl
+	case "$cmd" in
+	init) cmd_init "$@" ;;
+	ica) cmd_ica "$@" ;;
+	issue) cmd_issue issue "$@" ;;
+	sign-csr) cmd_issue sign-csr "$@" ;;
+	revoke) cmd_revoke "$@" ;;
+	crl) cmd_crl "$@" ;;
+	verify) cmd_verify "$@" ;;
+	list) cmd_list "$@" ;;
+	serve) cmd_serve "$@" ;;
+	*) die "unknown command '$cmd' (see 'mockpca help')" ;;
+	esac
+}
+
+main "$@"

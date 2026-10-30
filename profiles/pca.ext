@@ -1,0 +1,9 @@
+# PCA Certificate (CP v1.3): extensions Table 14, keyUsage Table 8,
+# basicConstraints Table 21 (no pathLenConstraint), subjectAltName Table 29,
+# subjectKeyIdentifier Table 32 (hash = Method 1).
+# digitalSignature is set because a CA may sign its own OCSP responses (Table 8).
+[ mockpca_ext ]
+basicConstraints     = critical, CA:TRUE
+keyUsage             = critical, digitalSignature, keyCertSign, cRLSign
+subjectAltName       = @mockpca_san
+subjectKeyIdentifier = hash

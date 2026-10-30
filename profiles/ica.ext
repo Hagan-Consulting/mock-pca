@@ -1,0 +1,14 @@
+# ICA Certificate (CP v1.3): extensions Table 15, authorityInfoAccess Table 17
+# (OCSP only), authorityKeyIdentifier Table 19, basicConstraints Tables 22/23,
+# certificatePolicies Table 37, cRLDistributionPoints Table 24, keyUsage
+# Table 8, subjectAltName Table 29, subjectKeyIdentifier Table 32.
+# The variables come from the default section of the generated issue.cnf.
+[ mockpca_ext ]
+authorityInfoAccess    = OCSP;URI:${MOCKPCA_OCSP_URL}
+authorityKeyIdentifier = keyid:always
+basicConstraints       = critical, CA:TRUE, pathlen:${MOCKPCA_PATHLEN}
+certificatePolicies    = 1.3.6.1.4.1.55670.1
+crlDistributionPoints  = URI:${MOCKPCA_CRL_URL}
+keyUsage               = critical, digitalSignature, keyCertSign, cRLSign
+subjectAltName         = @mockpca_san
+subjectKeyIdentifier   = hash
