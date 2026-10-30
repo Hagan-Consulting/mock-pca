@@ -1196,23 +1196,39 @@ cmd_serve() {
 	pid=$!
 	trap 'kill "$pid" $sleeper 2>/dev/null; wait "$pid" 2>/dev/null; exit 0' INT TERM
 	note "serving $PKI/www and OCSP on $listen; CRLs are republished every $((hours * 30)) minutes (half their lifetime)"
-	# Responder certificates (30 days, renewed within 7 days of expiry) are
-	# checked at least daily, whatever the CRL interval.
-	local crl_every=$((hours * 1800)) wake last_crl=$SECONDS
-	wake=$((crl_every < 86400 ? crl_every : 86400))
+	# CRLs are republished every half lifetime; responder certificates (30
+	# days, renewed within 7 days of expiry) are checked daily, whatever the
+	# CRL interval. Sleep until whichever is due first.
+	local crl_every=$((hours * 1800)) next_crl next_check
+	next_crl=$((SECONDS + crl_every))
+	next_check=$((SECONDS + SERVE_CHECK_EVERY))
 	while kill -0 "$pid" 2>/dev/null; do
-		sleep "$wake" </dev/null >/dev/null 2>&1 &
+		sleep "$(serve_wait "$SECONDS" "$next_crl" "$next_check")" </dev/null >/dev/null 2>&1 &
 		sleeper=$!
 		wait "$sleeper" || true
 		sleeper=""
 		kill -0 "$pid" 2>/dev/null || break
-		refresh_responders
-		if ((SECONDS - last_crl >= crl_every)); then
+		if ((SECONDS >= next_check)); then
+			refresh_responders
+			next_check=$((SECONDS + SERVE_CHECK_EVERY))
+		fi
+		if ((SECONDS >= next_crl)); then
 			cmd_crl --all
-			last_crl=$SECONDS
+			next_crl=$((SECONDS + crl_every))
 		fi
 	done
 	wait "$pid"
+}
+
+# Seconds between responder certificate checks in serve.
+SERVE_CHECK_EVERY=86400
+
+# serve_wait NOW NEXT_CRL NEXT_CHECK: the seconds serve sleeps until the
+# earlier of the next CRL republishing and the next responder check (at
+# least 1, so an overdue task does not spin).
+serve_wait() {
+	local next=$(($2 < $3 ? $2 : $3))
+	echo $((next > $1 ? next - $1 : 1))
 }
 
 main() {
@@ -1251,4 +1267,7 @@ main() {
 	esac
 }
 
-main "$@"
+# Run main unless sourced (scripts/test-mockpca.sh tests single functions).
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
+	main "$@"
+fi
