@@ -1,0 +1,14 @@
+# Signing Certificate (CP v1.3): extensions Table 16, authorityInfoAccess Table 18,
+# authorityKeyIdentifier Table 20, certificatePolicies Table 38,
+# cRLDistributionPoints Table 25, keyUsage Table 11, extKeyUsage Table 27, subjectAltName Table 30,
+# subjectKeyIdentifier Table 33.
+# The variables come from the default section of the generated issue.cnf.
+[ mockpca_ext ]
+authorityInfoAccess    = caIssuers;URI:${MOCKPCA_CA_CERT_URL}, OCSP;URI:${MOCKPCA_OCSP_URL}
+authorityKeyIdentifier = keyid:always
+certificatePolicies    = 1.3.6.1.4.1.55670.1
+crlDistributionPoints  = URI:${MOCKPCA_CRL_URL}
+extendedKeyUsage       = critical, codeSigning
+keyUsage               = critical, digitalSignature
+subjectAltName         = @mockpca_san
+subjectKeyIdentifier   = hash

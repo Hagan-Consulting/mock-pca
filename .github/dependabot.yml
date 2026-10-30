@@ -1,0 +1,22 @@
+# Dependency update PRs. Updates still go through CI and human review; the
+# cooldown keeps freshly published (possibly compromised) releases out until
+# they have been public for a week. Security updates ignore the cooldown.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: "Deps"
+
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: "Deps"
