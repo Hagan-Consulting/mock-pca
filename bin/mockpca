@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright 2026 Hagan Consulting Inc.
+# SPDX-License-Identifier: Apache-2.0
+#
 # mockpca: development-only mock of the NG9-1-1 PCA PKI (CP v1.3).
 #
 # Creates a mock PCA root, ICAs and End-Entity certificates with OpenSSL,

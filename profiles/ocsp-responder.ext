@@ -1,3 +1,6 @@
+# Copyright 2026 Hagan Consulting Inc.
+# SPDX-License-Identifier: Apache-2.0
+#
 # Delegated OCSP responder (CSS) Certificate, one per CA, issued by that CA:
 # CP 7.3 (signed by the issuing CA, id-pkix-ocsp-nocheck), RFC 6960 4.2.2.2
 # (extKeyUsage id-kp-OCSPSigning), RFC 5280 4.2.1.3 (keyUsage digitalSignature

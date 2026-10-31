@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright 2026 Hagan Consulting Inc.
+# SPDX-License-Identifier: Apache-2.0
+#
 # Repository checks: gofmt, go vet, go test (with -race when cgo and a C
 # compiler are available). Run from anywhere; exits non-zero on failure.
 set -euo pipefail

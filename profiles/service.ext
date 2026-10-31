@@ -1,3 +1,6 @@
+# Copyright 2026 Hagan Consulting Inc.
+# SPDX-License-Identifier: Apache-2.0
+#
 # Service Certificate (CP v1.3): extensions Table 16, authorityInfoAccess Table 18,
 # authorityKeyIdentifier Table 20, certificatePolicies Table 38,
 # cRLDistributionPoints Table 25, keyUsage Table 10, extKeyUsage Table 26, subjectAltName Table 30,

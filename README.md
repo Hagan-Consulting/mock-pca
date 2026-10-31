@@ -11,6 +11,12 @@ buying production certificates.
 > unencrypted on disk. Never add a mock PCA root to a production trust bundle. The default PCA organisation is
 > `MOCK NG911 PCA - NOT FOR PRODUCTION`.
 
+> **Not affiliated.** This is an independent project of Hagan Consulting Inc. It is not affiliated with, endorsed or
+> certified by NENA, NIOC or the PSAP Credentialing Agency. Their names are used only to describe what the tool
+> imitates. The mock certificates carry the CP's real policy and Quad ID OIDs so that relying-party software accepts
+> them; they are safe only because they chain to a separate mock root (see
+> [docs/DESIGN.md](docs/DESIGN.md#security-notes)).
+
 ## What you get
 
 - **`bin/mockpca`**: a bash front end over `openssl ca`:
@@ -170,3 +176,8 @@ scripts/e2e.sh
 
 Rules for contributors (and coding agents) are in [CLAUDE.md](CLAUDE.md). The most important one: this repository
 stays independent of the software it is used to test. No code is shared with the Service/Agency Locator.
+
+## License
+
+Copyright 2026 Hagan Consulting Inc. Licensed under the [Apache License, Version 2.0](LICENSE); see also
+[NOTICE](NOTICE).

@@ -1,3 +1,6 @@
+// Copyright 2026 Hagan Consulting Inc.
+// SPDX-License-Identifier: Apache-2.0
+
 // Command mockpca-lint checks certificates against the certificate profiles
 // of the NG9-1-1 PKI Certificate Policy v1.3.
 //

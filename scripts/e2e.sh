@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright 2026 Hagan Consulting Inc.
+# SPDX-License-Identifier: Apache-2.0
+#
 # End-to-end test: builds the sample hierarchy with OpenSSL, verifies every
 # certificate, lints them strictly, serves CRLs and CA certificates over HTTP
 # and checks revocation (End-Entity and ICA) and stale CRLs. Needs OpenSSL 3,

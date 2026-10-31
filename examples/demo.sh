@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright 2026 Hagan Consulting Inc.
+# SPDX-License-Identifier: Apache-2.0
+#
 # Builds a sample mock PCA hierarchy:
 #
 #   PCA Root (pca)

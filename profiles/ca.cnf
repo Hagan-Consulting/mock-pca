@@ -1,3 +1,6 @@
+# Copyright 2026 Hagan Consulting Inc.
+# SPDX-License-Identifier: Apache-2.0
+#
 # OpenSSL `ca` configuration shared by every mock CA. bin/mockpca runs
 # openssl with the CA's own directory as the working directory, so `dir` is
 # relative. Extensions come from the per-issuance file (issue.cnf, built from
