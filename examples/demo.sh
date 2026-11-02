@@ -9,12 +9,12 @@
 #   │   └── Mock County ICA Tier3 (county, pathLenConstraint 0)
 #   │       ├── agency   psap      psap.county.mock.test
 #   │       ├── agent    jsmith    jsmith@psap.county.mock.test
-#   │       ├── element  sal       sal.county.mock.test (+ localhost, 127.0.0.1)
+#   │       ├── element  bcf       bcf.county.mock.test (+ localhost, 127.0.0.1)
 #   │       ├── service  esrp      esrp.county.mock.test
 #   │       └── signing  logsign   log.county.mock.test (ECDSA P-256)
 #   └── Mock Region ICA Tier2 (region, pathLenConstraint 0)
 #       ├── agency   rpsap     psap.region.mock.test
-#       └── element  rsal      sal.region.mock.test
+#       └── element  rbcf      bcf.region.mock.test
 #
 # Environment: MOCKPCA_PKI (default ./pki), BASE_URL (default
 # http://pca.mock.test:8080; the host must resolve to where `mockpca serve`
@@ -38,7 +38,7 @@ county=(--ca county --org "Mock County PSAP" --owner psap.county.mock.test)
 	--roles urn:emergency:service:responder.psap,urn:emergency:service:responder.police.local
 "$M" issue "${county[@]}" --profile agent --name jsmith --id jsmith@psap.county.mock.test \
 	--roles Dispatching,CallTaking
-"$M" issue "${county[@]}" --profile element --name sal --id sal.county.mock.test --roles SAL \
+"$M" issue "${county[@]}" --profile element --name bcf --id bcf.county.mock.test --roles BCF \
 	--dns localhost --ip 127.0.0.1
 "$M" issue "${county[@]}" --profile service --name esrp --id esrp.county.mock.test --roles ESRP,Bridge
 "$M" issue "${county[@]}" --profile signing --name logsign --id log.county.mock.test --roles LoggingService
@@ -46,6 +46,6 @@ county=(--ca county --org "Mock County PSAP" --owner psap.county.mock.test)
 region=(--ca region --org "Mock Region PSAP" --owner psap.region.mock.test)
 "$M" issue "${region[@]}" --profile agency --name rpsap --id psap.region.mock.test \
 	--roles urn:emergency:service:responder.psap
-"$M" issue "${region[@]}" --profile element --name rsal --id sal.region.mock.test --roles SAL
+"$M" issue "${region[@]}" --profile element --name rbcf --id bcf.region.mock.test --roles BCF
 
 "$M" list

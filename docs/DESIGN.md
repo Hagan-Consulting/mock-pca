@@ -36,7 +36,7 @@ requirements in §5–6 are not imitated), registration-authority workflows, and
 - **`mockpca-serve`** serves `www/` read-only and is the HTTP front end of the OCSP responders (`internal/ocsp`). It
   does not sign anything itself.
 
-Go code uses the standard library only. A new module needs the product owner's approval (CLAUDE.md).
+Go code uses the standard library only. A new module needs the maintainers' approval (CLAUDE.md).
 
 ## PKI directory
 
@@ -116,7 +116,7 @@ a hosts file or container DNS) rather than a temporary address.
 6. Only then write `ca.conf`/`ee.conf`, build `chain.pem` and `fullchain.pem`; for CAs, also publish
    `www/certs/<name>.cer` and an initial CRL.
 
-Lesson from the feasibility study: OpenSSL ignores configuration directives it does not know, without an error. One
+Lesson from early prototypes: OpenSSL ignores configuration directives it does not know, without an error. One
 prototype silently produced certificates without their AIA, CDP and policy extensions. That is why the lint step is
 mandatory and cannot be skipped. (`preserve = yes` above is a second example: accepted and not applied.)
 
@@ -141,14 +141,14 @@ Every CA answers OCSP at `<base>/ocsp/<ca>` (the URL in its certificates' AIA): 
 certificates it issued, the PCA for the ICAs. `mockpca-serve` is only the front end:
 
 1. **Decoding** (`internal/ocsp`): POST bodies (`application/ocsp-request`) and GET paths (RFC 6960 A.1) up to
-   64 KiB. GET is strict (product owner policy: the tool is a test target, so clients that do not follow the RFCs
+   64 KiB. GET is strict (maintainer policy: the tool is a test target, so clients that do not follow the RFCs
    fail visibly instead of being worked around). RFC 9919 section 6 requires base64 per RFC 4648 section 4,
    nothing outside its alphabet, URL-encoded per RFC 3986, where `/` separates path segments and must be sent as
    `%2F`; RFC 4648 section 3.2 requires padding. An unescaped `/`, a missing padding, whitespace or non-zero padding
    bits are `malformedRequest`, with the reason logged; unescaped `+` and `=` are valid path characters and accepted.
    `/ocsp/` requests reach the responder before the ServeMux, whose path cleaning would otherwise redirect a request
    with `//` instead of answering it. The DER is parsed as an OCSPRequest with `encoding/asn1` (at most 32 CertIDs)
-   before OpenSSL sees it. The built-in `openssl ocsp -port` server was not used: in the feasibility study
+   before OpenSSL sees it. The built-in `openssl ocsp -port` server was not used: in tests with OpenSSL 3.0.13
    one malformed request terminated it, it answered from a stale index, and its own man page calls it a test tool.
 2. **Signing**: one `openssl ocsp -index ca/<ca>/index.txt -CA ca/<ca>/ca.pem -rsigner … -rkey … -rmd sha256 -nmin N
    -reqin … -respout …` run per request, so the database is read fresh and revocations show at once. SHA-1 and
@@ -182,8 +182,9 @@ certificates it issued, the PCA for the ICAs. `mockpca-serve` is only the front 
 
 ## Platforms
 
-Supported: Linux and macOS (bash ≥ 4.4 and OpenSSL 3 from a package manager). Windows users run the tool under WSL;
-Git Bash is not supported (product owner decision): its path conversion rewrites the `-subj` arguments.
+Tested: Linux. Expected to work but untested: macOS (bash ≥ 4.4 and OpenSSL 3 from a package manager). Windows users
+run the tool under WSL; Git Bash is not supported (maintainer decision): its path conversion rewrites the `-subj`
+arguments.
 
 - The script avoids GNU-only tool flags.
 - OpenSSL runs inside each CA's directory, and the CA configuration uses `dir = .`.

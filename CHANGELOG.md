@@ -31,4 +31,4 @@ All notable changes to this project are documented in this file. The format is b
   daily.
 - `examples/demo.sh` sample hierarchy, `scripts/e2e.sh` OpenSSL end-to-end test, design, profile and CP notes docs.
 - Repository scaffold: Go module (standard library only), checks, CI and Dependabot configuration. Supported
-  platforms: Linux and macOS; Windows through WSL (Git Bash is not supported).
+  platforms: Linux (tested), macOS (expected to work, untested); Windows through WSL (Git Bash is not supported).

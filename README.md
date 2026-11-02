@@ -1,11 +1,16 @@
 # mock-pca
 
+[![CI](https://github.com/Hagan-Consulting/mock-pca/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Hagan-Consulting/mock-pca/actions/workflows/ci.yml)
+
 Development-only tooling that imitates the NG9-1-1 PSAP Credentialing Agency (PCA) PKI: a mock PCA root, any number
 of Intermediate CAs (ICAs), and Agency, Agent, Element, Service and Signing certificates built per the
 **NG9-1-1 PKI Certificate Policy (CP) v1.3**, plus CRLs for revocation testing.
 
-It lets NG9-1-1 software (for example the Service/Agency Locator) be tested against PCA-shaped certificates without
-buying production certificates.
+It lets NG9-1-1 relying-party software be tested against PCA-shaped certificates without buying production
+certificates.
+
+**Status:** pre-1.0 development tool. Commands, options and the PKI directory layout may still change between
+releases (see [CHANGELOG.md](CHANGELOG.md)).
 
 > **Not for production.** The certificates and keys are for development and testing only. Private keys are stored
 > unencrypted on disk. Never add a mock PCA root to a production trust bundle. The default PCA organisation is
@@ -49,8 +54,8 @@ buying production certificates.
 | Go | 1.27.3 (`go.mod`) | builds `mockpca-lint` and `mockpca-serve` from this checkout on first use |
 | curl | any | only for `scripts/e2e.sh` |
 
-Supported: Linux and macOS (Homebrew bash and OpenSSL); on Windows, use WSL. Git Bash is not supported. Tested on
-Linux so far; see [docs/DESIGN.md](docs/DESIGN.md#platforms).
+Platforms: Linux is tested. macOS (bash ≥ 4.4 and OpenSSL 3 from a package manager) is expected to work but untested;
+reports are welcome. On Windows, use WSL; Git Bash is not supported. See [docs/DESIGN.md](docs/DESIGN.md#platforms).
 
 ## Quick start
 
@@ -71,13 +76,13 @@ with a hosts-file entry `127.0.0.1 pca.mock.test`. Or set the base URL before ru
 BASE_URL=http://127.0.0.1:8080 examples/demo.sh
 ```
 
-Using the result with relying-party software, e.g. the Service/Agency Locator:
+Using the result with relying-party software:
 
 | Purpose | File |
 |---|---|
-| PCA trust bundle (`client-ca-file`, `sal-cli -ca-file`) | `pki/trust/pca.pem` |
-| Server/client certificate chain (`tls-cert-file`, `-cert-file`) | `pki/ee/<name>/fullchain.pem` |
-| Private key (`tls-key-file`, `-key-file`) | `pki/ee/<name>/key.pem` |
+| PCA trust bundle (client CA file, CA file) | `pki/trust/pca.pem` |
+| Server/client certificate chain | `pki/ee/<name>/fullchain.pem` |
+| Private key | `pki/ee/<name>/key.pem` |
 | Certificate only / issuing chain | `pki/ee/<name>/cert.pem`, `pki/ee/<name>/chain.pem` |
 
 ## Commands
@@ -120,7 +125,7 @@ By default the tool does not produce CP violations. It enforces:
 
 | Scenario | How |
 |---|---|
-| Revoked End-Entity certificate | `bin/mockpca revoke --ee sal --reason keyCompromise` |
+| Revoked End-Entity certificate | `bin/mockpca revoke --ee bcf --reason keyCompromise` |
 | Revoked ICA (whole branch) | `bin/mockpca revoke --ca county --reason CACompromise` |
 | Stale CRL (past `nextUpdate`) | `bin/mockpca crl --ca county --seconds 60` and wait a minute. A running `mockpca serve` republishes only every `--crl-hours`/2, but restarting it republishes all CRLs |
 | Unreachable distribution point | Stop `mockpca serve` |
@@ -175,7 +180,7 @@ scripts/e2e.sh
 ```
 
 Rules for contributors (and coding agents) are in [CLAUDE.md](CLAUDE.md). The most important one: this repository
-stays independent of the software it is used to test. No code is shared with the Service/Agency Locator.
+stays independent of the software it is used to test. No code is shared with any relying party.
 
 ## License
 

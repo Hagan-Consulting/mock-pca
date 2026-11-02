@@ -54,7 +54,7 @@ BASE_URL="http://127.0.0.1:$PORT" examples/demo.sh >/dev/null 2>"$WORK/demo.log"
 	fail "examples/demo.sh"
 }
 
-EES=(psap jsmith sal esrp logsign rpsap rsal)
+EES=(psap jsmith bcf esrp logsign rpsap rbcf)
 
 step "external CSR"
 openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$WORK/ext.key" 2>/dev/null
@@ -81,7 +81,7 @@ step "issuance rules"
 expect_fail "End-Entity certificate from the PCA" "$M" issue --ca pca --profile agency --name frompca \
 	--id frompca.mock.test --roles x --org X
 grep -q 'issues ICA certificates only' "$WORK/out" || fail "output: $(cat "$WORK/out")"
-expect_fail "certificateHold" "$M" revoke --ee rsal --reason certificateHold
+expect_fail "certificateHold" "$M" revoke --ee rbcf --reason certificateHold
 psap_roles=urn:emergency:service:responder.psap,urn:emergency:service:responder.police.local
 expect_fail "duplicate Quad ID under another ICA" "$M" issue --ca region --profile agency --name dupquad \
 	--id psap.county.mock.test --roles "$psap_roles" --org "Mock Region PSAP"
@@ -105,13 +105,13 @@ expect_fail "agent user@fqdn iD with a dNSName" "$M" issue --ca county --profile
 grep -q 'not a DNS name' "$WORK/out" || fail "output: $(cat "$WORK/out")"
 "$M" ica --name county2 --parent state --id ica.county2.mock.test --owner psap2.county.mock.test \
 	--org "Mock County 911" --label "Mock County Two" 2>/dev/null
-"$M" issue --ca county2 --profile element --name c2 --id c2.county.mock.test --roles SAL \
+"$M" issue --ca county2 --profile element --name c2 --id c2.county.mock.test --roles BCF \
 	--owner psap2.county.mock.test --org "Mock County PSAP Two" 2>/dev/null
 EES+=(psap-renewed nioc console c2)
 [[ $(openssl x509 -in "$PKI/ca/state/ca.pem" -noout -subject) == \
 	"subject=C = US, O = Mock State 911, OU = ICA-1, ST = VT, CN = Mock State ICA Tier2" ]] || fail "ICA subject order"
-[[ $(openssl x509 -in "$PKI/ee/sal/cert.pem" -noout -subject) == \
-	"subject=C = US, O = Mock County PSAP, CN = sal.county.mock.test" ]] || fail "End-Entity subject order"
+[[ $(openssl x509 -in "$PKI/ee/bcf/cert.pem" -noout -subject) == \
+	"subject=C = US, O = Mock County PSAP, CN = bcf.county.mock.test" ]] || fail "End-Entity subject order"
 
 step "ICA re-key (ica --renew, CP 3.1.5)"
 "$M" ica --name region2 --renew region 2>/dev/null
@@ -123,9 +123,9 @@ new_subj="$(openssl x509 -in "$PKI/ca/region2/ca.pem" -noout -subject)"
 	fail "re-key: subjects should differ in the OU serial only: $old_subj / $new_subj"
 [[ $(openssl x509 -in "$PKI/ca/region/ca.pem" -noout -pubkey) != $(openssl x509 -in "$PKI/ca/region2/ca.pem" -noout -pubkey) ]] ||
 	fail "re-key kept the key"
-"$M" issue --ca region2 --profile element --name rsal2 --id sal2.region.mock.test --roles SAL \
+"$M" issue --ca region2 --profile element --name rbcf2 --id bcf2.region.mock.test --roles BCF \
 	--owner psap.region.mock.test --org "Mock Region PSAP" 2>/dev/null
-EES+=(rsal2)
+EES+=(rbcf2)
 expect_fail "re-key with another iD" "$M" ica --name region3 --renew region --id other.region.mock.test
 grep -q 'a re-key keeps the id' "$WORK/out" || fail "output: $(cat "$WORK/out")"
 expect_fail "re-key under another parent" "$M" ica --name region3 --renew region --parent state
@@ -137,7 +137,7 @@ grep -q "use 'ica --renew NAME'" "$WORK/out" || fail "output: $(cat "$WORK/out")
 step "a failed lint leaves nothing valid behind"
 printf '#!/bin/sh\necho "fake lint: ERROR"\nexit 1\n' >"$WORK/fail-lint"
 chmod +x "$WORK/fail-lint"
-rej=(--ca region --profile element --name rej --id rej.region.mock.test --roles SAL --owner psap.region.mock.test --org V)
+rej=(--ca region --profile element --name rej --id rej.region.mock.test --roles BCF --owner psap.region.mock.test --org V)
 expect_fail "issue with a failing lint" env MOCKPCA_LINT="$WORK/fail-lint" "$M" issue "${rej[@]}"
 [[ ! -e $PKI/ee/rej ]] || fail "rejected End-Entity certificate left in ee/"
 rejcert="$(ls "$PKI"/rejected/rej-*/cert.pem)"
@@ -337,7 +337,7 @@ openssl ocsp -respin "$WORK/staple.der" -issuer "$PKI/ca/region/ca.pem" -sha256 
 expect_status "$rpsap" good
 
 step "OCSP shows revocations at once"
-"$M" issue --ca region --profile element --name ocspee --id ocspee.region.mock.test --roles SAL \
+"$M" issue --ca region --profile element --name ocspee --id ocspee.region.mock.test --roles BCF \
 	--owner psap.region.mock.test --org "Mock Region PSAP" 2>/dev/null
 ocsp_q region "$PKI/ee/ocspee/cert.pem" sha256
 expect_status "$PKI/ee/ocspee/cert.pem" good
@@ -426,9 +426,9 @@ grep -q 'certificate revoked' "$WORK/out" || fail "verify output: $(cat "$WORK/o
 
 step "revocation of an ICA"
 "$M" revoke --ca county --reason CACompromise 2>/dev/null
-expect_fail "verify below the revoked ICA" "$M" verify --ee sal
+expect_fail "verify below the revoked ICA" "$M" verify --ee bcf
 grep -q 'certificate revoked' "$WORK/out" || fail "verify output: $(cat "$WORK/out")"
-"$M" verify --ee rsal >/dev/null
+"$M" verify --ee rbcf >/dev/null
 expect_fail "issuing from the revoked ICA" "$M" issue --ca county --profile agency --name late \
 	--id late.county.mock.test --roles x --org X
 [[ ! -e $PKI/ee/late ]] || fail "refused issuance left a directory"
@@ -436,7 +436,7 @@ expect_fail "issuing from the revoked ICA" "$M" issue --ca county --profile agen
 step "revoked ancestor ICA"
 "$M" revoke --ca state --reason CACompromise 2>/dev/null
 expect_fail "issuing below a revoked ancestor" "$M" issue --ca county2 --profile element --name c3 \
-	--id c3.county.mock.test --roles SAL --owner psap2.county.mock.test --org "Mock County PSAP Two"
+	--id c3.county.mock.test --roles BCF --owner psap2.county.mock.test --org "Mock County PSAP Two"
 grep -q "its issuer 'state' is revoked" "$WORK/out" || fail "output: $(cat "$WORK/out")"
 expect_fail "verify below a revoked ancestor" "$M" verify --ee c2
 grep -q 'certificate revoked' "$WORK/out" || fail "verify output: $(cat "$WORK/out")"
@@ -444,9 +444,9 @@ grep -q 'certificate revoked' "$WORK/out" || fail "verify output: $(cat "$WORK/o
 step "stale CRL"
 "$M" crl --ca region --seconds 1 2>/dev/null
 sleep 2
-expect_fail "verify with a stale CRL" "$M" verify --ee rsal
+expect_fail "verify with a stale CRL" "$M" verify --ee rbcf
 grep -q 'CRL has expired' "$WORK/out" || fail "verify output: $(cat "$WORK/out")"
 "$M" crl --ca region 2>/dev/null
-"$M" verify --ee rsal >/dev/null
+"$M" verify --ee rbcf >/dev/null
 
 echo "OK"
