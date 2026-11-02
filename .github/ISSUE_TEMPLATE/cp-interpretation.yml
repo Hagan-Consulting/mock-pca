@@ -1,0 +1,28 @@
+name: CP interpretation
+description: A certificate profile or check reads the NG9-1-1 PKI CP v1.3 differently from you, or from production certificates.
+body:
+  - type: input
+    id: location
+    attributes:
+      label: CP v1.3 location
+      description: Section and/or table, e.g. "7.1.2.11, Table 30".
+    validations:
+      required: true
+  - type: input
+    id: note
+    attributes:
+      label: Existing CP-NOTES entry
+      description: The N-number in docs/CP-NOTES.md, if there is one.
+  - type: textarea
+    id: current
+    attributes:
+      label: What mock-pca does today
+    validations:
+      required: true
+  - type: textarea
+    id: proposed
+    attributes:
+      label: Proposed reading and why
+      description: Quote the CP text briefly. Production certificates that show the other reading are very helpful (public certificates only).
+    validations:
+      required: true
