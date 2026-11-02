@@ -66,7 +66,7 @@ These keep the tool trustworthy as a test target. The full list, also used by co
 - User-visible changes get a one-line entry under `## [Unreleased]` in [CHANGELOG.md](CHANGELOG.md)
   ([Keep a Changelog](https://keepachangelog.com/en/1.1.0/)).
 - Update README.md and the docs in the same pull request when behaviour changes.
-- Pull requests from new contributors need a maintainer's approval before CI runs.
+- CI on pull requests from first-time contributors may wait for a maintainer's approval.
 
 ## License of contributions
 
