@@ -162,7 +162,7 @@ cmd/mockpca-serve      HTTP publication of CA certificates and CRLs, OCSP (Go, s
 internal/lint          lint rules
 internal/ocsp          OCSP request decoding, fault injection, OpenSSL signing
 examples/demo.sh       sample hierarchy
-scripts/check.sh       gofmt, go vet, go test -race, bash -n
+scripts/check.sh       gofmt, go vet, go test -race, bash -n, shellcheck (if installed)
 scripts/e2e.sh         OpenSSL end-to-end test
 docs/                  DESIGN.md, PROFILES.md, CP-NOTES.md
 ```

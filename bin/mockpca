@@ -122,6 +122,8 @@ check_int() { valid_int "$2" || die "$1: '$2' is not a non-negative integer"; }
 check_dn() {
 	local opt="$1" v="$2"
 	[[ -n $v ]] || die "$opt must not be empty"
+	# '\' below is a literal backslash pattern, not an attempt to escape a quote.
+	# shellcheck disable=SC1003
 	[[ $v =~ [[:cntrl:]] || $v == *'#'* || $v == *'$'* || $v == *'\'* || $v == *'"'* ]] &&
 		die "$opt: control characters, '#', '\$', '\\' and '\"' are not allowed"
 	[[ $v == " "* || $v == *" " ]] && die "$opt: leading or trailing space"
@@ -453,7 +455,8 @@ cmd_init() {
 	genkey rsa:4096 "$d/ca.key"
 	write_issue_cnf "$d/issue.cnf" pca "cAId/$id/PCA/$id" "" ""
 	"$OPENSSL" req -new -config "$d/issue.cnf" -key "$d/ca.key" -out "$d/ca.csr"
-	local subj="/C=$country/O=$(subj_escape "$org")/OU=PCA-$ou_serial/CN=$(subj_escape "$cn")"
+	local subj
+	subj="/C=$country/O=$(subj_escape "$org")/OU=PCA-$ou_serial/CN=$(subj_escape "$cn")"
 	(cd "$d" && "$OPENSSL" ca -batch -config "$CA_CNF" -preserveDN -selfsign -keyfile ca.key -in ca.csr -out ca.pem \
 		-extfile issue.cnf -extensions mockpca_ext -days "$days" -notext -subj "$subj" 2>/dev/null) ||
 		die "issuing the PCA certificate failed"
@@ -548,7 +551,8 @@ cmd_ica() {
 	local cn="$label ICA Tier$tier"
 	check_dn "CN ($cn)" "$cn"
 	# Subject attribute order of CP Table 2: c, o, ou, [st], [l], cn.
-	local subj="/C=$country/O=$(subj_escape "$org")/OU=ICA-$ou_serial"
+	local subj
+	subj="/C=$country/O=$(subj_escape "$org")/OU=ICA-$ou_serial"
 	[[ -z $st ]] || subj+="/ST=$(subj_escape "$st")"
 	[[ -z $l ]] || subj+="/L=$(subj_escape "$l")"
 	subj+="/CN=$(subj_escape "$cn")"
@@ -596,6 +600,8 @@ cmd_ica() {
 	chain_of "$name" >"$d/chain.pem"
 	publish_ca_cert "$name"
 	gen_crl "$name"
+	# Inside "${renew:+...}" the single quotes are literal and $renew expands.
+	# shellcheck disable=SC2016
 	note "ICA '$name' (Tier $tier, pathLenConstraint $pathlen) created: $d/ca.pem${renew:+ (re-key of '$renew')}"
 	issue_responder "$name"
 }
@@ -990,7 +996,8 @@ cmd_issue() {
 	done
 
 	# Subject attribute order of CP Tables 2 and 36: c, o, [l], [st], [ou], cn.
-	local subj="/C=$country/O=$(subj_escape "$org")"
+	local subj
+	subj="/C=$country/O=$(subj_escape "$org")"
 	[[ -z $l ]] || subj+="/L=$(subj_escape "$l")"
 	[[ -z $st ]] || subj+="/ST=$(subj_escape "$st")"
 	[[ -z $ou ]] || subj+="/OU=$(subj_escape "$ou")"

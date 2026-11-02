@@ -33,7 +33,8 @@ scripts/check.sh
 scripts/e2e.sh
 ```
 
-`check.sh` runs gofmt, `go vet`, `go test -race` (when cgo is available), `bash -n` and the `bin/mockpca` unit tests.
+`check.sh` runs gofmt, `go vet`, `go test -race` (when cgo is available), `bash -n`, shellcheck (when installed; CI
+uses the version pinned in `.github/workflows/ci.yml`) and the `bin/mockpca` unit tests.
 `e2e.sh` builds a full mock PKI with OpenSSL in a temporary directory and checks issuance, linting, CRLs and OCSP.
 
 ## Rules
