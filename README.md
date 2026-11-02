@@ -54,6 +54,8 @@ releases (see [CHANGELOG.md](CHANGELOG.md)).
 | Go | 1.27.3 (`go.mod`) | builds `mockpca-lint` and `mockpca-serve` from this checkout on first use |
 | curl | any | only for `scripts/e2e.sh` |
 
+Or use the [container image](#container), which needs only Docker.
+
 Platforms: Linux is tested. macOS (bash ≥ 4.4 and OpenSSL 3 from a package manager) is expected to work but untested;
 reports are welcome. On Windows, use WSL; Git Bash is not supported. See [docs/DESIGN.md](docs/DESIGN.md#platforms).
 
@@ -84,6 +86,39 @@ Using the result with relying-party software:
 | Server/client certificate chain | `pki/ee/<name>/fullchain.pem` |
 | Private key | `pki/ee/<name>/key.pem` |
 | Certificate only / issuing chain | `pki/ee/<name>/cert.pem`, `pki/ee/<name>/chain.pem` |
+
+## Container
+
+Instead of installing bash, OpenSSL and Go, you can use the container image: `bin/mockpca` with Debian's OpenSSL 3 and
+prebuilt `mockpca-lint` and `mockpca-serve`. The entrypoint is `mockpca`. It runs as an unprivileged user (uid
+10001), and the PKI is in `/pki`. Keep `/pki` on a volume: the image declares none, so a `docker run` without `-v`
+loses the PKI.
+
+```bash
+docker build -t mock-pca:dev .
+docker run --rm -v mockpca-pki:/pki --entrypoint /opt/mockpca/examples/demo.sh mock-pca:dev
+docker run --rm -v mockpca-pki:/pki mock-pca:dev list
+docker run -d --init --name mockpca -v mockpca-pki:/pki -p 127.0.0.1:8080:8080 mock-pca:dev serve --listen 0.0.0.0:8080
+```
+
+- `serve` must listen on `0.0.0.0` inside the container. Publish the port on `127.0.0.1` as above unless other
+  machines need it. `--init` passes `docker stop` on to the server reliably.
+- Other commands (`revoke`, `crl`, `ocsp-fault`, …) run in further containers on the same volume while the server
+  runs; it picks up their changes immediately.
+- Files out of the volume, e.g. the trust anchor:
+  `docker run --rm -v mockpca-pki:/pki --entrypoint cat mock-pca:dev /pki/trust/pca.pem >pca.pem`.
+- Files in (`sign-csr --csr`, `lint`): mount them read-only, e.g. `-v "$PWD/csr:/in:ro"` and `--csr /in/x.csr`.
+- A host directory instead of a named volume: create it empty and run as its owner, e.g.
+  `-v "$PWD/pki:/pki" --user "$(id -u):$(id -g)"`.
+
+`compose.yaml` builds the image and serves the PKI on `127.0.0.1:8080`. On the compose network the server is also
+`pca.mock.test`, the host in the demo's certificate URLs, so relying-party containers attached to that network (the
+project's default network, e.g. `mock-pca_default`) reach the CRL, CA certificate and OCSP URLs without a hosts entry.
+
+```bash
+docker compose run --rm --entrypoint /opt/mockpca/examples/demo.sh pca
+docker compose up -d
+```
 
 ## Commands
 
@@ -155,16 +190,19 @@ bin/mockpca lint -root pki/trust/pca.pem fullchain.pem
 ## Repository layout
 
 ```text
-bin/mockpca            bash CLI (OpenSSL)
-profiles/              ca.cnf (shared CA config) and one *.ext per CP profile
-cmd/mockpca-lint       profile checker (Go, standard library)
-cmd/mockpca-serve      HTTP publication of CA certificates and CRLs, OCSP (Go, standard library)
-internal/lint          lint rules
-internal/ocsp          OCSP request decoding, fault injection, OpenSSL signing
-examples/demo.sh       sample hierarchy
-scripts/check.sh       gofmt, go vet, go test -race, bash -n, shellcheck (if installed)
-scripts/e2e.sh         OpenSSL end-to-end test
-docs/                  DESIGN.md, PROFILES.md, CP-NOTES.md
+bin/mockpca                bash CLI (OpenSSL)
+profiles/                  ca.cnf (shared CA config) and one *.ext per CP profile
+cmd/mockpca-lint           profile checker (Go, standard library)
+cmd/mockpca-serve          HTTP publication of CA certificates and CRLs, OCSP (Go, standard library)
+internal/lint              lint rules
+internal/ocsp              OCSP request decoding, fault injection, OpenSSL signing
+examples/demo.sh           sample hierarchy
+scripts/check.sh           gofmt, go vet, go test -race, bash -n, shellcheck (if installed)
+scripts/e2e.sh             OpenSSL end-to-end test
+scripts/container-test.sh  container image smoke test (Docker)
+Dockerfile                 container image
+compose.yaml               local server from the container image
+docs/                      DESIGN.md, PROFILES.md, CP-NOTES.md
 ```
 
 The generated PKI directory is described in [docs/DESIGN.md](docs/DESIGN.md#pki-directory).
@@ -177,6 +215,10 @@ scripts/check.sh
 
 ```bash
 scripts/e2e.sh
+```
+
+```bash
+scripts/container-test.sh
 ```
 
 How to contribute, and the rules for changes, are in [CONTRIBUTING.md](CONTRIBUTING.md) (coding agents:

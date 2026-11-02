@@ -6,6 +6,9 @@ All notable changes to this project are documented in this file. The format is b
 ## [Unreleased]
 
 ### Added
+- Container image (`Dockerfile`, Debian trixie-slim with OpenSSL 3, prebuilt Go tools, non-root user, PKI in
+  `/pki`), `compose.yaml` serving the PKI as `pca.mock.test`, the `scripts/container-test.sh` smoke test in CI, and
+  `MOCKPCA_SERVE` to use a prebuilt `mockpca-serve` (like `MOCKPCA_LINT`).
 - Licensed under the Apache License 2.0 (`LICENSE`, `NOTICE`, SPDX headers); README states that the project is
   not affiliated with NENA, NIOC or the PSAP Credentialing Agency.
 - Contributor documentation: `CONTRIBUTING.md`, `SECURITY.md` (private vulnerability reporting), `CODE_OF_CONDUCT.md`

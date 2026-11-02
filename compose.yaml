@@ -1,0 +1,25 @@
+# Mock PCA server for local development. DEVELOPMENT ONLY, NOT FOR PRODUCTION.
+# See README.md, "Container":
+#
+#   docker compose run --rm --entrypoint /opt/mockpca/examples/demo.sh pca
+#   docker compose up -d
+#
+# Other containers on this project's network reach the server as
+# pca.mock.test, the host name in the demo's certificate URLs.
+services:
+  pca:
+    build: .
+    image: mock-pca:dev
+    init: true
+    command: ["serve", "--listen", "0.0.0.0:8080"]
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - pki:/pki
+    networks:
+      default:
+        aliases:
+          - pca.mock.test
+
+volumes:
+  pki: {}

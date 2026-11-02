@@ -2,8 +2,9 @@
 # and on pushes to main.
 #
 # Supply-chain rules (see CLAUDE.md): every action is pinned to a full commit
-# SHA (version in the trailing comment, updated by Dependabot), tools are pinned
-# by exact version and SHA-256 (updated by hand), the token gets the least
+# SHA (version in the trailing comment, updated by Dependabot), base images in
+# the Dockerfile by digest (Dependabot), tools by exact version and SHA-256
+# (updated by hand), the token gets the least
 # permissions per job and checkouts do not persist credentials.
 name: CI
 
@@ -57,6 +58,20 @@ jobs:
           go-version-file: go.mod
       - run: openssl version
       - run: bash scripts/e2e.sh
+
+  container:
+    name: container image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: docker version
+      # Builds the image from the Dockerfile and runs the smoke test against it.
+      - run: bash scripts/container-test.sh
 
   shellcheck:
     name: shellcheck
