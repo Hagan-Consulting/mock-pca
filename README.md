@@ -12,10 +12,10 @@ buying production certificates.
 > `MOCK NG911 PCA - NOT FOR PRODUCTION`.
 
 > **Not affiliated.** This is an independent project of Hagan Consulting Inc. It is not affiliated with, endorsed or
-> certified by NENA, NIOC or the PSAP Credentialing Agency. Their names are used only to describe what the tool
-> imitates. The mock certificates carry the CP's real policy and Quad ID OIDs so that relying-party software accepts
-> them; they are safe only because they chain to a separate mock root (see
-> [docs/DESIGN.md](docs/DESIGN.md#security-notes)).
+> certified by NENA, the NG9-1-1 Interoperability Oversight Commission (NIOC) or the PSAP Credentialing Agency. Their
+> names are used only to describe what the tool imitates. The mock certificates carry the CP's real policy and Quad ID
+> OIDs so that relying-party software accepts them; they are safe only because they chain to a separate mock root
+> (see [docs/DESIGN.md](docs/DESIGN.md#security-notes)).
 
 ## What you get
 
