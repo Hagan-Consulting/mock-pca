@@ -28,6 +28,9 @@ attack surface.
 - Pin GitHub Actions to full 40-char commit SHAs (`uses: owner/repo@<sha> # vX.Y.Z`), container images by `@sha256:`
   digest, Go tools by exact version. Never a branch, `latest` or a floating tag. Resolve SHAs/digests from the upstream
   source yourself and only adopt releases public for at least a week.
+- Tools downloaded in CI (e.g. ShellCheck) are pinned by exact version and SHA-256, checked with `sha256sum -c`. Where
+  upstream publishes no checksum, take the digest from a second independent source as well, and record both in the
+  workflow comment. Dependabot does not update these pins; update them by hand under the same rules.
 - Workflows: top-level `permissions: {}`, minimal per-job permissions, `persist-credentials: false` on checkout, no
   `pull_request_target`, no untrusted `${{ }}` expressions inside `run:` scripts, no secrets in PR-triggered jobs.
 - Never disable TLS verification, checksum or signature checks to make something work; stop and ask instead.

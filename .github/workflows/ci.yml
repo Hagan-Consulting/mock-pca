@@ -66,8 +66,10 @@ jobs:
       contents: read
     env:
       # Upstream publishes no checksums. Digest computed from the release asset
-      # (downloaded twice, identical); on an update, check that the release has
-      # been public for at least a week and recompute.
+      # and cross-checked with the sha256 that shellcheck-py records in its
+      # setup.cfg for the same asset (PyPI shellcheck-py 0.11.0.1). On an
+      # update: release public for at least a week, recompute the digest and
+      # compare it with shellcheck-py's setup.cfg for the matching version.
       SHELLCHECK_VERSION: v0.11.0
       SHELLCHECK_SHA256: 8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
     steps:
