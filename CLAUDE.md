@@ -1,17 +1,19 @@
 # mock-pca — agent guide
 
+Guide for coding agents working in this repository. Human contributors follow the same hard rules and conventions.
+
 Development-only mock of the NG9-1-1 PCA PKI. Start with `README.md`, then `docs/DESIGN.md` (architecture and
 decisions), `docs/PROFILES.md` (certificate profiles vs. the CP tables) and `docs/CP-NOTES.md` (CP ambiguities and our
-interpretation). The normative source is the NG9-1-1 PKI Certificate Policy (CP) v1.3; a copy lives in the
-Service/Agency Locator repository (`docs/references/NG9-1-1-PKI-CP-v1.3-FINAL-09-29-2026.pdf`), not here.
+interpretation). The normative source is the NG9-1-1 PKI Certificate Policy (CP) v1.3; it is not included in this
+repository.
 
 ## Hard rules
-- **Independence:** this repository tests NG9-1-1 software such as the Service/Agency Locator (SAL). Never import, copy
-  or vendor code from the SAL repository; an independent implementation is the point (a shared bug would hide itself).
+- **Independence:** this repository is used to test NG9-1-1 relying-party software. Never import, copy or vendor code
+  from software it is used to test; an independent implementation is the point (a shared bug would hide itself).
 - Certificates, CSRs and CRLs are produced by **OpenSSL ≥ 3.0** (`bin/mockpca`, `profiles/`). Go code (`cmd/`,
   `internal/`) only checks, serves and (later) answers OCSP; it never issues certificates.
 - Go 1.27.3, module `github.com/hagan-consulting/mock-pca`, **standard library only**. Adding any module (including
-  `golang.org/x/...`) needs the product owner's approval first.
+  `golang.org/x/...`) needs the maintainers' approval first.
 - Never commit generated PKI material: private keys, CSRs, certificates, CRLs, `pki/` directories. `.gitignore`
   covers the defaults; test material is created in temporary directories at test time.
 - Every certificate the tool issues is checked by `mockpca-lint` against the CP profile. Do not add a way to skip the
@@ -46,8 +48,9 @@ attack surface.
   (OpenSSL end-to-end run, needs `openssl` ≥ 3.0 and `curl`).
 
 ## Committing
-- Small, logical commits (one feature or fix with its tests and docs). Imperative summary line, optional body, ending
-  with `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
+- Small, logical commits (one feature or fix with its tests and docs). Imperative summary line, optional body. Commits
+  made by a coding agent end with a `Co-Authored-By:` trailer naming the agent (for Claude:
+  `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`); human commits need no trailer.
 - Stage explicit paths only (`git add <paths>`), never `git add -A`.
 - User-visible changes get a one-line entry under `## [Unreleased]` in `CHANGELOG.md` (Keep a Changelog).
 - Changes reach `main` through pull requests; never push to `main` directly or force-push a shared branch.
