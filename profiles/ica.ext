@@ -1,3 +1,6 @@
+# Copyright 2026 Hagan Consulting Inc.
+# SPDX-License-Identifier: Apache-2.0
+#
 # ICA Certificate (CP v1.3): extensions Table 15, authorityInfoAccess Table 17
 # (OCSP only), authorityKeyIdentifier Table 19, basicConstraints Tables 22/23,
 # certificatePolicies Table 37, cRLDistributionPoints Table 24, keyUsage

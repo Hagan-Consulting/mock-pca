@@ -1,3 +1,6 @@
+// Copyright 2026 Hagan Consulting Inc.
+// SPDX-License-Identifier: Apache-2.0
+
 // Package lint checks X.509 certificates against the certificate profiles of
 // the NG9-1-1 PKI Certificate Policy (CP) v1.3: names (§3.1.1, Table 2,
 // §7.1.4), key sizes and algorithms (Table 7, §7.1.3), key usage (Tables

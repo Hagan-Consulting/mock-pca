@@ -1,3 +1,6 @@
+// Copyright 2026 Hagan Consulting Inc.
+// SPDX-License-Identifier: Apache-2.0
+
 // Package ocsp is the HTTP front end of the mock PCA's OCSP responders. It
 // decodes and checks OCSP requests (RFC 6960 A.1, RFC 5019, RFC 9919), applies
 // the fault injection configured for a CA, and has OpenSSL sign every

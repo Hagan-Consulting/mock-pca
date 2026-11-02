@@ -1,3 +1,6 @@
+# Copyright 2026 Hagan Consulting Inc.
+# SPDX-License-Identifier: Apache-2.0
+#
 # NEGATIVE TEST FIXTURE, not a CP profile: an OCSP responder certificate issued
 # by the CA but WITHOUT id-pkix-ocsp-nocheck (CP 7.3 requires it). Used only by
 # `mockpca ocsp-fault --no-nocheck`, to test whether relying parties reject such

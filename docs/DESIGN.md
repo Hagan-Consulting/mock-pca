@@ -199,6 +199,10 @@ Only Linux has been tested so far. Running `scripts/e2e.sh` on macOS is an open 
 - Generated material never enters the repository (`.gitignore`; tests use temporary directories).
 - Mock material is easy to recognise: the default PCA organisation contains `MOCK … NOT FOR PRODUCTION`, and the
   examples use `.test` names (RFC 6761).
+- Mock certificates carry the CP's real OIDs (policy `1.3.6.1.4.1.55670.1`, Quad ID `1.3.6.1.4.1.55670.1.1`) on
+  purpose: relying parties check them, so certificates without them would not test anything. This does not make them
+  valid in production: they chain only to a mock PCA root generated per PKI directory, which must never be added to a
+  production trust bundle.
 - `mockpca-serve`:
   - serves only names matching `<ca>.cer`/`<ca>.crl`, opened through `os.Root`, so symbolic links cannot escape
     `www/`

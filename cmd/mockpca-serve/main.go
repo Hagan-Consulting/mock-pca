@@ -1,3 +1,6 @@
+// Copyright 2026 Hagan Consulting Inc.
+// SPDX-License-Identifier: Apache-2.0
+
 // Command mockpca-serve publishes a mock PCA's CA certificates and CRLs and
 // answers OCSP requests over HTTP, at the caIssuers, cRLDistributionPoints
 // and OCSP URLs that bin/mockpca puts into certificates:

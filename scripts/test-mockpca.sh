@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright 2026 Hagan Consulting Inc.
+# SPDX-License-Identifier: Apache-2.0
+#
 # Unit tests for single bin/mockpca functions that need no PKI or OpenSSL.
 # Run from anywhere; exits non-zero on failure. scripts/check.sh runs it.
 set -euo pipefail
