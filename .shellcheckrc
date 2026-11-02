@@ -1,0 +1,4 @@
+# ShellCheck configuration (CI runs shellcheck from the repository root).
+# Resolve `# shellcheck source=` paths relative to the script that sources them.
+source-path=SCRIPTDIR
+external-sources=true

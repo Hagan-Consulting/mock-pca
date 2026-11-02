@@ -42,6 +42,15 @@ for f in bin/mockpca scripts/*.sh examples/*.sh; do
 	fi
 done
 
+# CI runs a pinned shellcheck (.github/workflows/ci.yml); locally it runs only
+# when installed, and other versions may report differently.
+if command -v shellcheck >/dev/null 2>&1; then
+	echo "==> shellcheck ($(shellcheck --version | sed -n 's/^version: //p'))"
+	shellcheck bin/mockpca scripts/*.sh examples/*.sh
+else
+	echo "==> shellcheck (not installed, skipped; CI runs it)"
+fi
+
 echo "==> bin/mockpca unit tests"
 bash scripts/test-mockpca.sh
 

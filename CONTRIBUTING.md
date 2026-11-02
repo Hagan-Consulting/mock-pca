@@ -33,7 +33,8 @@ scripts/check.sh
 scripts/e2e.sh
 ```
 
-`check.sh` runs gofmt, `go vet`, `go test -race` (when cgo is available), `bash -n` and the `bin/mockpca` unit tests.
+`check.sh` runs gofmt, `go vet`, `go test -race` (when cgo is available), `bash -n`, shellcheck (when installed; CI
+uses the version pinned in `.github/workflows/ci.yml`) and the `bin/mockpca` unit tests.
 `e2e.sh` builds a full mock PKI with OpenSSL in a temporary directory and checks issuance, linting, CRLs and OCSP.
 
 ## Rules
@@ -55,7 +56,10 @@ These keep the tool trustworthy as a test target. The full list, also used by co
 - **Recognisable mock material:** the default PCA organisation contains `MOCK` and `NOT FOR PRODUCTION`; examples use
   names under `.test` (RFC 6761).
 - **Supply chain:** GitHub Actions pinned to full commit SHAs, tools to exact versions, no floating tags; workflows
-  keep `permissions: {}` at the top and minimal per-job permissions. Never disable TLS, checksum or signature checks.
+  keep `permissions: {}` at the top and minimal per-job permissions. Tools downloaded in CI are pinned by exact version
+  and SHA-256 (checked with `sha256sum -c`); where upstream publishes no checksum, cross-check the digest with a second
+  source; Dependabot does not update these pins, so update them by hand. Never disable TLS, checksum or signature
+  checks.
 - **CP citations:** name the CP v1.3 section or table for every profile rule. A new interpretation of unclear CP text
   gets an entry in `docs/CP-NOTES.md`.
 

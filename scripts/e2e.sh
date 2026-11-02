@@ -240,7 +240,7 @@ ocsp_q() {
 }
 # expect_status CERT STATUS: the last query verified and reported STATUS.
 expect_status() {
-	grep -q 'Response verify OK' "$WORK/ocsp.out" && grep -q "^$1: $2\$" "$WORK/ocsp.out" ||
+	{ grep -q 'Response verify OK' "$WORK/ocsp.out" && grep -q "^$1: $2\$" "$WORK/ocsp.out"; } ||
 		fail "OCSP: want $2 for $1; got: $(cat "$WORK/ocsp.out")"
 }
 rpsap="$PKI/ee/rpsap/cert.pem"
@@ -266,7 +266,7 @@ next_update="$(sed -n 's/^ *Next Update: //p' "$WORK/resp.txt" | head -1)"
 [[ $(to_epoch "$(hdr last-modified)") == "$(to_epoch "$this_update")" ]] ||
 	fail "OCSP GET: Last-Modified $(hdr last-modified) is not thisUpdate $this_update"
 max_age="$(hdr cache-control | sed -n 's/^max-age=\([0-9][0-9]*\), public, no-transform, must-revalidate$/\1/p')"
-[[ -n $max_age ]] && ((t0 + max_age < $(to_epoch "$next_update"))) ||
+{ [[ -n $max_age ]] && ((t0 + max_age < $(to_epoch "$next_update"))); } ||
 	fail "OCSP GET: Cache-Control $(hdr cache-control) does not end before nextUpdate $next_update"
 [[ $(hdr etag) == "\"$(openssl dgst -sha256 -r "$WORK/resp.der" | cut -d' ' -f1)\"" ]] ||
 	fail "OCSP GET: ETag $(hdr etag) is not the SHA-256 of the response"
