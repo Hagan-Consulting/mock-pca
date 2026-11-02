@@ -1,0 +1,15 @@
+name: Feature request
+description: A test scenario or capability mock-pca should support.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: scenario
+    attributes:
+      label: Relying-party test you want to make possible
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behaviour
+      description: Commands, options or output you have in mind, and the CP or RFC sections involved.

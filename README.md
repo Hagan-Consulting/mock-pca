@@ -179,8 +179,11 @@ scripts/check.sh
 scripts/e2e.sh
 ```
 
-Rules for contributors (and coding agents) are in [CLAUDE.md](CLAUDE.md). The most important one: this repository
-stays independent of the software it is used to test. No code is shared with any relying party.
+How to contribute, and the rules for changes, are in [CONTRIBUTING.md](CONTRIBUTING.md) (coding agents:
+[CLAUDE.md](CLAUDE.md)). The most important rule: this repository stays independent of the software it is used to
+test. No code is shared with any relying party. Participation is governed by the [Code of Conduct](CODE_OF_CONDUCT.md).
+
+Report security vulnerabilities privately, as described in [SECURITY.md](SECURITY.md).
 
 ## License
 
