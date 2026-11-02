@@ -54,8 +54,8 @@ releases (see [CHANGELOG.md](CHANGELOG.md)).
 | Go | 1.27.3 (`go.mod`) | builds `mockpca-lint` and `mockpca-serve` from this checkout on first use |
 | curl | any | only for `scripts/e2e.sh` |
 
-Platforms: Linux is tested. macOS (bash ≥ 4.4 and OpenSSL 3 from Homebrew) is expected to work but untested; reports
-are welcome. On Windows, use WSL; Git Bash is not supported. See [docs/DESIGN.md](docs/DESIGN.md#platforms).
+Platforms: Linux is tested. macOS (bash ≥ 4.4 and OpenSSL 3 from a package manager) is expected to work but untested;
+reports are welcome. On Windows, use WSL; Git Bash is not supported. See [docs/DESIGN.md](docs/DESIGN.md#platforms).
 
 ## Quick start
 
