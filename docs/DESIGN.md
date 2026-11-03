@@ -190,7 +190,12 @@ arguments.
 - OpenSSL runs inside each CA's directory, and the CA configuration uses `dir = .`.
 - `.gitattributes` keeps LF line endings for the script and the profiles, also in Windows checkouts used from WSL.
 - `OPENSSL_CONF=/dev/null` keeps system OpenSSL configuration from changing results. Go tools are built into
-  `.build/`.
+  `.build/`, unless `MOCKPCA_LINT` and `MOCKPCA_SERVE` name prebuilt binaries.
+- Container image (`Dockerfile`): Debian trixie-slim with Debian's OpenSSL 3 and bash, `bin/mockpca`, `profiles/`
+  and `examples/` under `/opt/mockpca` (the repository layout the script expects), and `mockpca-lint` and
+  `mockpca-serve` built in a separate Go stage, so the image has no Go toolchain. It runs as an unprivileged user
+  (uid 10001) with the PKI in `/pki` (`MOCKPCA_PKI`). The image has no `VOLUME`, so `docker run` never creates an
+  anonymous volume that would lose the PKI between commands. Base images are pinned by digest.
 
 Only Linux has been tested so far. Running `scripts/e2e.sh` on macOS is an open task.
 

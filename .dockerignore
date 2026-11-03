@@ -1,0 +1,12 @@
+# Build context allowlist: only what the image needs. Keeps generated PKI
+# material (pki/, keys) and .git out of the context.
+*
+!go.mod
+!cmd/
+!internal/
+!bin/mockpca
+!profiles/
+!examples/
+!LICENSE
+!NOTICE
+**/*_test.go

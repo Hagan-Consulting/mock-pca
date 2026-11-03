@@ -38,6 +38,8 @@ mockpca: development-only mock of the NG9-1-1 PCA PKI (CP v1.3). NOT FOR PRODUCT
 usage: mockpca [--pki DIR] COMMAND [options]
 
 The PKI directory defaults to $MOCKPCA_PKI, else ./pki.
+$MOCKPCA_LINT / $MOCKPCA_SERVE: prebuilt mockpca-lint / mockpca-serve to use instead of building them from
+this checkout (the container image sets both).
 
 Commands:
   init      Create the PKI directory and the mock PCA root.
@@ -202,7 +204,9 @@ ee_dir() {
 	printf '%s' "$d"
 }
 
-# Tools are built from this checkout on first use (go build caches).
+# Tools are built from this checkout on first use (go build caches), unless
+# $MOCKPCA_LINT / $MOCKPCA_SERVE name prebuilt binaries (as in the container
+# image, which has no Go toolchain).
 go_tool() {
 	local name="$1" exe
 	command -v go >/dev/null 2>&1 || die "Go is required to build $name (see README)"
@@ -1198,7 +1202,7 @@ cmd_serve() {
 	kv_set "$PKI/pki.conf" crl_hours "$hours"
 	local serve pid sleeper=""
 	((nmin >= 1)) || die "--ocsp-nmin must be at least 1"
-	serve="$(go_tool mockpca-serve)"
+	serve="${MOCKPCA_SERVE:-$(go_tool mockpca-serve)}"
 	resolve_lint
 	refresh_responders
 	cmd_crl --all
