@@ -38,6 +38,8 @@ mockpca: development-only mock of the NG9-1-1 PCA PKI (CP v1.3). NOT FOR PRODUCT
 usage: mockpca [--pki DIR] COMMAND [options]
 
 The PKI directory defaults to $MOCKPCA_PKI, else ./pki.
+$MOCKPCA_LINT / $MOCKPCA_SERVE: prebuilt mockpca-lint / mockpca-serve to use instead of building them from
+this checkout (the container image sets both).
 
 Commands:
   init      Create the PKI directory and the mock PCA root.

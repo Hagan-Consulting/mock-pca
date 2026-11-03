@@ -126,6 +126,9 @@ docker compose up -d
 mockpca [--pki DIR] COMMAND [options]       (PKI directory: --pki, else $MOCKPCA_PKI, else ./pki)
 ```
 
+`MOCKPCA_LINT` / `MOCKPCA_SERVE`: prebuilt `mockpca-lint` / `mockpca-serve` to use instead of building them from this
+checkout (the container image sets both).
+
 | Command | Purpose |
 |---|---|
 | `init --base-url URL --id FQDN` | Create the PKI directory and the PCA root (RSA 4096, 10 years). `--org`, `--country`, `--cn`, `--ou-serial`, `--days`. |
