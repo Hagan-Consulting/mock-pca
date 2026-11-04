@@ -199,6 +199,37 @@ arguments.
 
 Only Linux has been tested so far. Running `scripts/e2e.sh` on macOS is an open task.
 
+## Container image publishing
+
+CI publishes `ghcr.io/hagan-consulting/mock-pca` after its checks pass (`.github/workflows/publish-image.yml`, called
+from `ci.yml`): `edge` and `sha-<short commit>` on every push to `main`; `X.Y.Z`, `X.Y`, `latest` and `sha-<short
+commit>` on a release tag `vX.Y.Z` (only on `main`, with a CHANGELOG section). Each architecture is built on a native
+runner (`ubuntu-24.04`, `ubuntu-24.04-arm`) with BuildKit provenance (`mode=max`) and an SBOM, without caches, pushed
+by digest and then smoke-tested by pulling that digest (`scripts/container-test.sh`); one index then combines both,
+and `actions/attest` pushes a signed build provenance attestation for it (repository variable `ATTEST_IMAGES=false`
+turns this off).
+
+Every publish ends with `tools/ghcr-prune`, which applies this retention policy to the package:
+
+| Version | Kept |
+|---|---|
+| Any tag other than `sha-*` (`X.Y.Z`, `X.Y`, `latest`, `edge`) | forever (`edge` until the next `main` build moves it) |
+| Tagged only `sha-<commit>` (older `main` builds) | 14 days, then deleted by the next publish |
+| Untagged, and neither an entry of a kept image index (platform images, attestation manifests) nor a referrer of a kept manifest (pushed attestations) | not kept: deleted by the same publish |
+
+The prune works out the whole plan before deleting anything and stops with nothing deleted on any error (including a
+manifest whose content does not match its digest, or a nested index it cannot protect) or when the plan has more than
+100 deletions. It logs every version with its decision and reason, and the version ids of deletions, which GitHub
+can restore for 30 days. Deleting needs the repository to have the Admin role on the package (package settings →
+Manage Actions access). All publishes run one at a time across refs (concurrency group `ghcr-publish-mock-pca`,
+`queue: max`), so the prune never sees another run's per-architecture images before they are combined. Pruning
+runs only when something is published, so expired images stay until the next push to `main` or release tag. The
+per-architecture tags of 0.1.0 (`0.1.0-amd64`, `0.1.0-arm64`) are not `sha-*` and are therefore kept; a maintainer
+can delete them by hand.
+
+The policy matches the one in the maintainers' other projects; `tools/ghcr-prune` is an independent implementation
+(CLAUDE.md, independence rule).
+
 ## Security notes
 
 - This is development tooling. Keys are unencrypted PKCS#8 files, created with `umask 077`.

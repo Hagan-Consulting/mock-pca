@@ -1,5 +1,7 @@
-# CI: Go checks and the OpenSSL end-to-end run on every pull request to main
-# and on pushes to main.
+# CI: Go checks, the OpenSSL end-to-end run and the container image test on
+# every pull request to main; on pushes to main and release tags vX.Y.Z the
+# same checks gate the multi-arch image publish to GHCR
+# (publish-image.yml), which ends with the registry prune.
 #
 # Supply-chain rules (see CLAUDE.md): every action is pinned to a full commit
 # SHA (version in the trailing comment, updated by Dependabot), base images in
@@ -13,6 +15,7 @@ on:
     branches: [main]
   push:
     branches: [main]
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
 
 permissions: {}
 
@@ -60,8 +63,16 @@ jobs:
       - run: bash scripts/e2e.sh
 
   container:
-    name: container image
-    runs-on: ubuntu-24.04
+    name: container image (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     permissions:
       contents: read
@@ -104,3 +115,24 @@ jobs:
           shellcheck --version
           shellcheck --version | grep -qx "version: ${SHELLCHECK_VERSION#v}"
       - run: shellcheck bin/mockpca scripts/*.sh examples/*.sh
+
+  publish:
+    name: publish image to GHCR
+    if: github.event_name == 'push'
+    needs: [check, e2e, container, shellcheck]
+    # One publish (push, tag, attest, prune) at a time across all refs, so
+    # the prune never sees the untagged per-architecture images of a publish
+    # that is still running. queue: max keeps every pending publish instead
+    # of cancelling all but the newest (it cannot be combined with
+    # cancel-in-progress: true).
+    concurrency:
+      group: ghcr-publish-mock-pca
+      cancel-in-progress: false
+      queue: max
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    uses: ./.github/workflows/publish-image.yml
