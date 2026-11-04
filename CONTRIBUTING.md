@@ -75,6 +75,14 @@ These keep the tool trustworthy as a test target. The full list, also used by co
 - Update README.md and the docs in the same pull request when behaviour changes.
 - CI on pull requests from first-time contributors may wait for a maintainer's approval.
 
+## Releases
+
+Maintainers release by merging a pull request that moves the `## [Unreleased]` entries in CHANGELOG.md into a
+`## [X.Y.Z] - YYYY-MM-DD` section, then pushing a signed tag `vX.Y.Z` on that commit of `main`. The tag starts
+`.github/workflows/release-image.yml`, which publishes the container image for linux/amd64 and linux/arm64 to
+`ghcr.io/hagan-consulting/mock-pca` with a build provenance attestation. The workflow refuses tags that are not on
+`main` or have no matching CHANGELOG section.
+
 ## License of contributions
 
 mock-pca is licensed under the [Apache License 2.0](LICENSE). Unless you explicitly state otherwise, any contribution
