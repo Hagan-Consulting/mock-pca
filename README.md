@@ -4,7 +4,7 @@
 
 Development-only tooling that imitates the NG9-1-1 PSAP Credentialing Agency (PCA) PKI: a mock PCA root, any number
 of Intermediate CAs (ICAs), and Agency, Agent, Element, Service and Signing certificates built per the
-**NG9-1-1 PKI Certificate Policy (CP) v1.3**, plus CRLs for revocation testing.
+**[NG9-1-1 PKI Certificate Policy (CP) v1.3](https://ng911ioc.org/wp-content/uploads/2026/09/NG9-1-1-PKI-CP-v1.3-FINAL-09-29-2026.pdf)**, plus CRLs for revocation testing.
 
 It lets NG9-1-1 relying-party software be tested against PCA-shaped certificates without buying production
 certificates.
