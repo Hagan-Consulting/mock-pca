@@ -4,8 +4,8 @@ Guide for coding agents working in this repository. Human contributors follow th
 
 Development-only mock of the NG9-1-1 PCA PKI. Start with `README.md`, then `docs/DESIGN.md` (architecture and
 decisions), `docs/PROFILES.md` (certificate profiles vs. the CP tables) and `docs/CP-NOTES.md` (CP ambiguities and our
-interpretation). The normative source is the NG9-1-1 PKI Certificate Policy (CP) v1.3; it is not included in this
-repository.
+interpretation). The normative source is the NG9-1-1 PKI Certificate Policy (CP) v1.3, published by NIOC at
+<https://ng911ioc.org/wp-content/uploads/2026/09/NG9-1-1-PKI-CP-v1.3-FINAL-09-29-2026.pdf> (not included in this repository).
 
 ## Hard rules
 - **Independence:** this repository is used to test NG9-1-1 relying-party software. Never import, copy or vendor code

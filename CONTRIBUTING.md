@@ -63,7 +63,7 @@ These keep the tool trustworthy as a test target. The full list, also used by co
   and SHA-256 (checked with `sha256sum -c`); where upstream publishes no checksum, cross-check the digest with a second
   source; Dependabot does not update these pins, so update them by hand. Never disable TLS, checksum or signature
   checks.
-- **CP citations:** name the CP v1.3 section or table for every profile rule. A new interpretation of unclear CP text
+- **CP citations:** name the [CP v1.3](https://ng911ioc.org/wp-content/uploads/2026/09/NG9-1-1-PKI-CP-v1.3-FINAL-09-29-2026.pdf) section or table for every profile rule. A new interpretation of unclear CP text
   gets an entry in `docs/CP-NOTES.md`.
 
 ## Pull requests
