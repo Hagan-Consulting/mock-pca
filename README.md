@@ -100,8 +100,8 @@ Every push to `main` publishes `:edge` (the latest `main` build) and `:sha-<comm
 and verify it with the GitHub CLI:
 
 ```bash
-docker pull ghcr.io/hagan-consulting/mock-pca:0.1.0
-gh attestation verify oci://ghcr.io/hagan-consulting/mock-pca:0.1.0 -R Hagan-Consulting/mock-pca
+docker pull ghcr.io/hagan-consulting/mock-pca:0.1.1
+gh attestation verify oci://ghcr.io/hagan-consulting/mock-pca:0.1.1 -R Hagan-Consulting/mock-pca
 ```
 
 Releases, `latest` and `edge` stay in the registry. Images tagged only `sha-<commit>` (older `main` builds) are deleted

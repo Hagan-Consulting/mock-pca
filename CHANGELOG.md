@@ -5,6 +5,8 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-11-04
+
 ### Changed
 - Container images are published from CI after its checks pass: `edge` and `sha-<commit>` on every push to `main`,
   `X.Y.Z`, `X.Y`, `latest` and `sha-<commit>` on release tags, with BuildKit provenance and an SBOM in addition to the
@@ -61,5 +63,6 @@ First public release.
 - Contributor documentation: `CONTRIBUTING.md`, `SECURITY.md` (private vulnerability reporting), `CODE_OF_CONDUCT.md`
   (Contributor Covenant 2.1), issue forms, a pull request template and `CODEOWNERS`.
 
-[Unreleased]: https://github.com/Hagan-Consulting/mock-pca/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/Hagan-Consulting/mock-pca/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/Hagan-Consulting/mock-pca/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/Hagan-Consulting/mock-pca/releases/tag/v0.1.0
