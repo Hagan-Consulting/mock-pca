@@ -5,16 +5,11 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-11-04
+
+First public release.
+
 ### Added
-- Container image (`Dockerfile`, Debian trixie-slim with OpenSSL 3, prebuilt Go tools, non-root user, PKI in
-  `/pki`), `compose.yaml` serving the PKI as `pca.mock.test`, the `scripts/container-test.sh` smoke test in CI, and
-  `MOCKPCA_SERVE` to use a prebuilt `mockpca-serve` (like `MOCKPCA_LINT`).
-- Licensed under the Apache License 2.0 (`LICENSE`, `NOTICE`, SPDX headers); README states that the project is
-  not affiliated with NENA, NIOC or the PSAP Credentialing Agency.
-- Contributor documentation: `CONTRIBUTING.md`, `SECURITY.md` (private vulnerability reporting), `CODE_OF_CONDUCT.md`
-  (Contributor Covenant 2.1), issue forms, a pull request template and `CODEOWNERS`.
-- CI runs ShellCheck (pinned v0.11.0, SHA-256 verified) on `bin/mockpca` and the scripts; `scripts/check.sh` runs it
-  when installed.
 - `bin/mockpca`: OpenSSL-based mock PCA: `init` (PCA root), `ica` (Tier-2/Tier-n ICAs, re-key with `--renew`),
   `issue` and `sign-csr` (Agency, Agent, Element, Service, Signing certificates per CP v1.3 with the Quad ID),
   `revoke`, `crl`, `verify`, `list`, `lint`, `serve`. It enforces the CP by default: every issued certificate must
@@ -36,6 +31,18 @@ All notable changes to this project are documented in this file. The format is b
   fault injection per CA (`mockpca ocsp-fault`, including a responder certificate without `id-pkix-ocsp-nocheck` as a
   negative fixture); stapling files (`mockpca ocsp-response`); `mockpca serve` checks responder certificates at least
   daily.
+- Container image (`Dockerfile`, Debian trixie-slim with OpenSSL 3, prebuilt Go tools, non-root user, PKI in
+  `/pki`), `compose.yaml` serving the PKI as `pca.mock.test`, the `scripts/container-test.sh` smoke test in CI, and
+  `MOCKPCA_SERVE` to use a prebuilt `mockpca-serve` (like `MOCKPCA_LINT`).
 - `examples/demo.sh` sample hierarchy, `scripts/e2e.sh` OpenSSL end-to-end test, design, profile and CP notes docs.
 - Repository scaffold: Go module (standard library only), checks, CI and Dependabot configuration. Supported
   platforms: Linux (tested), macOS (expected to work, untested); Windows through WSL (Git Bash is not supported).
+- CI runs ShellCheck (pinned v0.11.0, SHA-256 verified) on `bin/mockpca` and the scripts; `scripts/check.sh` runs it
+  when installed.
+- Licensed under the Apache License 2.0 (`LICENSE`, `NOTICE`, SPDX headers); README states that the project is
+  not affiliated with NENA, NIOC or the PSAP Credentialing Agency.
+- Contributor documentation: `CONTRIBUTING.md`, `SECURITY.md` (private vulnerability reporting), `CODE_OF_CONDUCT.md`
+  (Contributor Covenant 2.1), issue forms, a pull request template and `CODEOWNERS`.
+
+[Unreleased]: https://github.com/Hagan-Consulting/mock-pca/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/Hagan-Consulting/mock-pca/releases/tag/v0.1.0
