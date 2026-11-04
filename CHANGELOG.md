@@ -5,6 +5,15 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Changed
+- Container images are published from CI after its checks pass: `edge` and `sha-<commit>` on every push to `main`,
+  `X.Y.Z`, `X.Y`, `latest` and `sha-<commit>` on release tags, with BuildKit provenance and an SBOM in addition to the
+  signed build provenance attestation. The per-architecture `X.Y.Z-amd64` and `X.Y.Z-arm64` tags are no longer
+  published.
+- CI applies an image retention policy to GHCR after every publish (`tools/ghcr-prune`): release images, `latest` and
+  `edge` kept, `sha-*`-only images deleted after 14 days, unneeded untagged manifests at once.
+- CI builds and smoke-tests the container image on linux/arm64 as well as linux/amd64 for every pull request.
+
 ### Fixed
 - Release workflow: the build provenance attestation is now pushed to the registry. The publish job logged out of
   ghcr.io before the attest step, which reads the registry login from the Docker configuration, so the 0.1.0 image

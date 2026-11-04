@@ -78,10 +78,12 @@ These keep the tool trustworthy as a test target. The full list, also used by co
 ## Releases
 
 Maintainers release by merging a pull request that moves the `## [Unreleased]` entries in CHANGELOG.md into a
-`## [X.Y.Z] - YYYY-MM-DD` section, then pushing a signed tag `vX.Y.Z` on that commit of `main`. The tag starts
-`.github/workflows/release-image.yml`, which publishes the container image for linux/amd64 and linux/arm64 to
-`ghcr.io/hagan-consulting/mock-pca` with a build provenance attestation. The workflow refuses tags that are not on
-`main` or have no matching CHANGELOG section.
+`## [X.Y.Z] - YYYY-MM-DD` section, then pushing a signed tag `vX.Y.Z` on that commit of `main`. CI
+(`.github/workflows/ci.yml`) runs the checks on the tag and then `.github/workflows/publish-image.yml`, which
+publishes the container image for linux/amd64 and linux/arm64 to `ghcr.io/hagan-consulting/mock-pca` with a build
+provenance attestation. It refuses tags that are not on `main` or have no matching CHANGELOG section. Every push to
+`main` publishes `edge` and `sha-<commit>` the same way; each publish ends by pruning the registry
+([docs/DESIGN.md](docs/DESIGN.md#container-image-publishing)).
 
 ## License of contributions
 

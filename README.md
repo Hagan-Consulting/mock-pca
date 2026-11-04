@@ -95,13 +95,17 @@ prebuilt `mockpca-lint` and `mockpca-serve`. The entrypoint is `mockpca`. It run
 loses the PKI.
 
 Each release is published for linux/amd64 and linux/arm64 as `ghcr.io/hagan-consulting/mock-pca:<version>` (also
-`:<major>.<minor>` and `:latest`), with a signed build provenance attestation. Pin a version or digest, and verify it
-with the GitHub CLI:
+`:<major>.<minor>` and `:latest`), with BuildKit provenance and an SBOM, and a signed build provenance attestation.
+Every push to `main` publishes `:edge` (the latest `main` build) and `:sha-<commit>`. Pin a release version or digest,
+and verify it with the GitHub CLI:
 
 ```bash
 docker pull ghcr.io/hagan-consulting/mock-pca:0.1.0
 gh attestation verify oci://ghcr.io/hagan-consulting/mock-pca:0.1.0 -R Hagan-Consulting/mock-pca
 ```
+
+Releases, `latest` and `edge` stay in the registry. Images tagged only `sha-<commit>` (older `main` builds) are deleted
+after 14 days, so do not depend on them; see [docs/DESIGN.md](docs/DESIGN.md#container-image-publishing).
 
 The examples below build the image from the checkout instead; replace `mock-pca:dev` with the published name to use a
 release.
@@ -215,6 +219,7 @@ examples/demo.sh           sample hierarchy
 scripts/check.sh           gofmt, go vet, go test -race, bash -n, shellcheck (if installed)
 scripts/e2e.sh             OpenSSL end-to-end test
 scripts/container-test.sh  container image smoke test (Docker)
+tools/ghcr-prune           CI only: GHCR image retention (Go, standard library; not in the image)
 Dockerfile                 container image
 compose.yaml               local server from the container image
 docs/                      DESIGN.md, PROFILES.md, CP-NOTES.md
