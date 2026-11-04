@@ -6,6 +6,9 @@ All notable changes to this project are documented in this file. The format is b
 ## [Unreleased]
 
 ### Added
+- Release workflow (`.github/workflows/release-image.yml`): on a `vX.Y.Z` tag on `main` with a matching CHANGELOG
+  section, builds the container image natively for linux/amd64 and linux/arm64, smoke-tests each build, publishes
+  `ghcr.io/hagan-consulting/mock-pca` (`X.Y.Z`, `X.Y`, `latest`) and attests its build provenance.
 - Container image (`Dockerfile`, Debian trixie-slim with OpenSSL 3, prebuilt Go tools, non-root user, PKI in
   `/pki`), `compose.yaml` serving the PKI as `pca.mock.test`, the `scripts/container-test.sh` smoke test in CI, and
   `MOCKPCA_SERVE` to use a prebuilt `mockpca-serve` (like `MOCKPCA_LINT`).
