@@ -94,6 +94,18 @@ prebuilt `mockpca-lint` and `mockpca-serve`. The entrypoint is `mockpca`. It run
 10001), and the PKI is in `/pki`. Keep `/pki` on a volume: the image declares none, so a `docker run` without `-v`
 loses the PKI.
 
+Each release is published for linux/amd64 and linux/arm64 as `ghcr.io/hagan-consulting/mock-pca:<version>` (also
+`:<major>.<minor>` and `:latest`), with a signed build provenance attestation. Pin a version or digest, and verify it
+with the GitHub CLI:
+
+```bash
+docker pull ghcr.io/hagan-consulting/mock-pca:0.1.0
+gh attestation verify oci://ghcr.io/hagan-consulting/mock-pca:0.1.0 -R Hagan-Consulting/mock-pca
+```
+
+The examples below build the image from the checkout instead; replace `mock-pca:dev` with the published name to use a
+release.
+
 ```bash
 docker build -t mock-pca:dev .
 docker run --rm -v mockpca-pki:/pki --entrypoint /opt/mockpca/examples/demo.sh mock-pca:dev

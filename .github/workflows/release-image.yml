@@ -1,0 +1,138 @@
+# Release image: when a release tag vX.Y.Z is pushed, build the container
+# image natively for linux/amd64 and linux/arm64, smoke-test each build with
+# scripts/container-test.sh, push it to the GitHub Container Registry, combine
+# both into one multi-arch image tagged X.Y.Z, X.Y and latest, and attest its
+# build provenance (Sigstore-signed, verifiable with `gh attestation verify`).
+#
+# Supply-chain rules (see CLAUDE.md): top-level permissions are empty and each
+# job gets only what it needs; checkouts do not persist credentials; actions
+# are pinned to full commit SHAs (updated by Dependabot); no third-party
+# actions: docker and buildx are the ones preinstalled on the GitHub-hosted
+# runner images, and the base images are pinned by digest in the Dockerfile.
+# Only tags on commits that are on main, with a matching CHANGELOG section,
+# are published. The image that is pushed is the image that was tested.
+name: Release image
+
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # GHCR names must be lower case (the GitHub owner is Hagan-Consulting).
+  IMAGE: ghcr.io/hagan-consulting/mock-pca
+
+jobs:
+  verify:
+    name: verify the release tag
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: The tagged commit is on main
+        run: git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+      - name: CHANGELOG.md has a section for the version
+        run: grep -Eq "^## \[${GITHUB_REF_NAME#v}\] - [0-9]{4}-[0-9]{2}-[0-9]{2}$" CHANGELOG.md
+
+  build:
+    name: build, test and push (${{ matrix.arch }})
+    needs: verify
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      # One output per architecture; matrix job outputs are combined.
+      digest_amd64: ${{ steps.push.outputs.digest_amd64 }}
+      digest_arm64: ${{ steps.push.outputs.digest_arm64 }}
+    env:
+      ARCH: ${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: docker version
+      - name: Build the image
+        run: |
+          [[ $(uname -m) == "$(case $ARCH in amd64) echo x86_64 ;; arm64) echo aarch64 ;; esac)" ]]
+          # Plain single-platform manifests (no BuildKit attestations): the
+          # provenance is attested by the publish job instead.
+          docker build --platform "linux/$ARCH" --provenance=false --sbom=false \
+            --label "org.opencontainers.image.version=${GITHUB_REF_NAME#v}" \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+            -t "mock-pca:release-$ARCH" .
+      - name: Smoke-test the image
+        run: bash scripts/container-test.sh "mock-pca:release-$ARCH"
+      - name: Push the image
+        id: push
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ref="$IMAGE:${GITHUB_REF_NAME#v}-$ARCH"
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          trap 'docker logout ghcr.io' EXIT
+          docker tag "mock-pca:release-$ARCH" "$ref"
+          docker push "$ref"
+          repo_digest="$(docker inspect --format '{{index .RepoDigests 0}}' "$ref")"
+          digest="${repo_digest#"$IMAGE@"}"
+          [[ $digest =~ ^sha256:[0-9a-f]{64}$ ]]
+          echo "digest_$ARCH=$digest" >> "$GITHUB_OUTPUT"
+          echo "Pushed $ref ($digest)"
+
+  publish:
+    name: publish the multi-arch image
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      packages: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      - name: Create the multi-arch tags
+        id: index
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DIGEST_AMD64: ${{ needs.build.outputs.digest_amd64 }}
+          DIGEST_ARM64: ${{ needs.build.outputs.digest_arm64 }}
+        run: |
+          for d in "$DIGEST_AMD64" "$DIGEST_ARM64"; do [[ $d =~ ^sha256:[0-9a-f]{64}$ ]]; done
+          version="${GITHUB_REF_NAME#v}"
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          trap 'docker logout ghcr.io' EXIT
+          docker buildx imagetools create \
+            -t "$IMAGE:$version" -t "$IMAGE:${version%.*}" -t "$IMAGE:latest" \
+            "$IMAGE@$DIGEST_AMD64" "$IMAGE@$DIGEST_ARM64"
+          raw="$(docker buildx imagetools inspect --raw "$IMAGE:$version")"
+          platforms="$(jq -r '[.manifests[].platform | "\(.os)/\(.architecture)"] | sort | join(" ")' <<<"$raw")"
+          [[ $platforms == "linux/amd64 linux/arm64" ]] || { echo "unexpected platforms: $platforms" >&2; exit 1; }
+          digest="$(docker buildx imagetools inspect --format '{{json .Manifest}}' "$IMAGE:$version" | jq -r .digest)"
+          [[ $digest =~ ^sha256:[0-9a-f]{64}$ ]]
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "Published $IMAGE:$version ($digest): linux/amd64 $DIGEST_AMD64, linux/arm64 $DIGEST_ARM64"
+      - name: Attest build provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.index.outputs.digest }}
+          push-to-registry: true
