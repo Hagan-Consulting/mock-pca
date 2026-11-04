@@ -5,6 +5,11 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Fixed
+- Release workflow: the build provenance attestation is now pushed to the registry. The publish job logged out of
+  ghcr.io before the attest step, which reads the registry login from the Docker configuration, so the 0.1.0 image
+  was published without an attestation.
+
 ## [0.1.0] - 2026-11-04
 
 First public release.

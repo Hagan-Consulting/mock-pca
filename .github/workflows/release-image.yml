@@ -109,17 +109,21 @@ jobs:
       attestations: write
       artifact-metadata: write
     steps:
+      # The login stays in ~/.docker/config.json until the last step: the
+      # attest step reads it from there to push the attestation (it has no
+      # credential input of its own).
+      - name: Log in to ghcr.io
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
       - name: Create the multi-arch tags
         id: index
         env:
-          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DIGEST_AMD64: ${{ needs.build.outputs.digest_amd64 }}
           DIGEST_ARM64: ${{ needs.build.outputs.digest_arm64 }}
         run: |
           for d in "$DIGEST_AMD64" "$DIGEST_ARM64"; do [[ $d =~ ^sha256:[0-9a-f]{64}$ ]]; done
           version="${GITHUB_REF_NAME#v}"
-          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
-          trap 'docker logout ghcr.io' EXIT
           docker buildx imagetools create \
             -t "$IMAGE:$version" -t "$IMAGE:${version%.*}" -t "$IMAGE:latest" \
             "$IMAGE@$DIGEST_AMD64" "$IMAGE@$DIGEST_ARM64"
@@ -136,3 +140,6 @@ jobs:
           subject-name: ${{ env.IMAGE }}
           subject-digest: ${{ steps.index.outputs.digest }}
           push-to-registry: true
+      - name: Log out of ghcr.io
+        if: always()
+        run: docker logout ghcr.io
